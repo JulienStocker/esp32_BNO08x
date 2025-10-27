@@ -225,7 +225,7 @@ esp_err_t BNO08x::init_gpio_inputs()
     gpio_config_t inputs_config;
     inputs_config.pin_bit_mask = (1ULL << imu_config.io_int);
     inputs_config.mode = GPIO_MODE_INPUT;
-    inputs_config.pull_up_en = GPIO_PULLUP_DISABLE;
+    inputs_config.pull_up_en = GPIO_PULLUP_ENABLE;  // ENABLE pull-up for INT pin (open-drain output from BNO085)
     inputs_config.pull_down_en = GPIO_PULLDOWN_DISABLE;
     inputs_config.intr_type = GPIO_INTR_NEGEDGE;
 
@@ -989,6 +989,14 @@ esp_err_t BNO08x::receive_packet_body(bno08x_rx_packet_t* packet)
     esp_err_t ret = ESP_OK;
 
     packet->length -= 4; // remove 4 header bytes from packet length (we already read those)
+    
+    if (packet->length > RX_DATA_LENGTH)
+    {
+        #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+        ESP_LOGE(TAG, "Packet length (%d) exceeds RX buffer size (%d), truncating", packet->length, RX_DATA_LENGTH);
+        #endif
+        packet->length = RX_DATA_LENGTH;
+    }
 
     // setup transacton to read the data packet
     spi_transaction.rx_buffer = packet->body;
