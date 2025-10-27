@@ -375,21 +375,21 @@ esp_err_t BNO08x::init_spi()
     uint8_t tx_buffer[50] = {0}; // for dummy transaction to stabilize SPI peripheral
 
     // initialize the spi peripheral
-    ret = spi_bus_initialize(imu_config.spi_peripheral, &bus_config, SPI_DMA_CH_AUTO);
-    if (ret != ESP_OK)
-    {
-        // clang-format off
-        #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Initialization failed, SPI bus failed to initialize.");
-        #endif
-        // clang-format on
+    // ret = spi_bus_initialize(imu_config.spi_peripheral, &bus_config, SPI_DMA_CH_AUTO);
+    // if (ret != ESP_OK)
+    // {
+    //     // clang-format off
+    //     #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+    //     ESP_LOGE(TAG, "Initialization failed, SPI bus failed to initialize.");
+    //     #endif
+    //     // clang-format on
 
-        return ret;
-    }
-    else
-    {
-        init_status.spi_bus = true;
-    }
+    //     return ret;
+    // }
+    // else
+    // {
+    //     init_status.spi_bus = true;
+    // }
 
     // add the imu device to the bus
     ret = spi_bus_add_device(imu_config.spi_peripheral, &imu_spi_config, &spi_hdl);
