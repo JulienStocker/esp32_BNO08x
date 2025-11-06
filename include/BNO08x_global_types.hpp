@@ -8,6 +8,9 @@
 #include <driver/spi_common.h>
 #include <driver/spi_master.h>
 
+// Forward declaration for mux support
+class MUX74HC154;
+
 /// @brief Sensor accuracy returned during sensor calibration
 enum class BNO08xAccuracy
 {
@@ -76,12 +79,16 @@ typedef struct bno08x_config_t
         gpio_num_t io_mosi;               ///<MOSI GPIO pin (connects to BNO08x DI pin)
         gpio_num_t io_miso;               ///<MISO GPIO pin (connects to BNO08x SDA pin)
         gpio_num_t io_sclk;               ///<SCLK pin (connects to BNO08x SCL pin)
-        gpio_num_t io_cs;                 /// Chip select pin (connects to BNO08x CS pin)
+        gpio_num_t io_cs;                 /// Chip select pin (connects to BNO08x CS pin) or mux output index if using mux
         gpio_num_t io_int;                /// Host interrupt pin (connects to BNO08x INT pin)
-        gpio_num_t io_rst;                /// Reset pin (connects to BNO08x RST pin)
+        gpio_num_t io_rst;                /// Reset pin (connects to BNO08x RST pin) or mux output index if using mux
         gpio_num_t io_wake;               ///<Wake pin (optional, connects to BNO08x P0)
         uint32_t sclk_speed;              ///<Desired SPI SCLK speed in Hz (max 3MHz)
         bool install_isr_service; ///<Indicates whether the ISR service for the HINT should be installed at IMU initialization, (if gpio_install_isr_service() is called before initialize() set this to false)
+
+        // Mux support
+        MUX74HC154* mux;                  ///< Pointer to MUX74HC154 instance (nullptr for direct GPIO mode)
+        uint8_t imu_id;                   ///< IMU ID (0-6 for 7 IMUs) used to calculate mux channel
 
         /// @brief Default IMU configuration settings constructor.
         /// To modify default GPIO pins, run "idf.py menuconfig" esp32_BNO08x->GPIO Configuration.
@@ -97,13 +104,16 @@ typedef struct bno08x_config_t
             , io_wake(static_cast<gpio_num_t>(CONFIG_ESP32_BNO08X_GPIO_WAKE))     // default: -1 (unused)
             , sclk_speed(static_cast<uint32_t>(CONFIG_ESP32_BNO08X_SCL_SPEED_HZ)) // default: 2MHz
             , install_isr_service(install_isr_service)                            // default: true
+            , mux(nullptr)                                                         // default: nullptr (direct GPIO mode)
+            , imu_id(0)                                                            // default: 0
 
         {
         }
 
         /// @brief Overloaded IMU configuration settings constructor for custom pin settings
         bno08x_config_t(spi_host_device_t spi_peripheral, gpio_num_t io_mosi, gpio_num_t io_miso, gpio_num_t io_sclk, gpio_num_t io_cs,
-                gpio_num_t io_int, gpio_num_t io_rst, gpio_num_t io_wake, uint32_t sclk_speed, bool install_isr_service = true)
+                gpio_num_t io_int, gpio_num_t io_rst, gpio_num_t io_wake, uint32_t sclk_speed, bool install_isr_service = true,
+                MUX74HC154* mux = nullptr, uint8_t imu_id = 0)
             : spi_peripheral(spi_peripheral)
             , io_mosi(io_mosi)
             , io_miso(io_miso)
@@ -114,6 +124,8 @@ typedef struct bno08x_config_t
             , io_wake(io_wake)
             , sclk_speed(sclk_speed)
             , install_isr_service(install_isr_service)
+            , mux(mux)
+            , imu_id(imu_id)
         {
         }
 } bno08x_config_t;

@@ -297,6 +297,12 @@ class BNO08x
         esp_err_t deinit_hint_isr();
         esp_err_t deinit_spi();
 
+        // Mux/GPIO abstraction for CS and RST pins
+        void set_cs_pin(uint8_t level);
+        void set_rst_pin(uint8_t level);
+        uint8_t get_cs_channel() const;
+        uint8_t get_rst_channel() const;
+
         bool wait_for_rx_done();
         bool wait_for_tx_done();
         bool wait_for_data();

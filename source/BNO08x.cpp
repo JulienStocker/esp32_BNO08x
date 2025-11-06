@@ -1,5 +1,6 @@
 #include "BNO08x.hpp"
 #include "BNO08x_macros.hpp"
+#include "MUX74HC154.hpp"
 
 /**
  * @brief BNO08x imu constructor.
@@ -257,11 +258,24 @@ esp_err_t BNO08x::init_gpio_outputs()
     esp_err_t ret = ESP_OK;
 
     // configure output(s) (CS, RST, and WAKE)
+    // Skip CS and RST if using mux mode
     gpio_config_t outputs_config;
 
-    outputs_config.pin_bit_mask = (imu_config.io_wake != GPIO_NUM_NC)
-                                          ? ((1ULL << imu_config.io_cs) | (1ULL << imu_config.io_rst) | (1ULL << imu_config.io_wake))
-                                          : ((1ULL << imu_config.io_cs) | (1ULL << imu_config.io_rst));
+    if (imu_config.mux != nullptr) {
+        // Mux mode - only configure WAKE if used, skip CS and RST
+        if (imu_config.io_wake != GPIO_NUM_NC) {
+            outputs_config.pin_bit_mask = (1ULL << imu_config.io_wake);
+        } else {
+            // No GPIO outputs to configure in mux mode without WAKE pin
+            init_status.gpio_outputs = true;
+            return ESP_OK;
+        }
+    } else {
+        // Direct GPIO mode - configure CS, RST, and optionally WAKE
+        outputs_config.pin_bit_mask = (imu_config.io_wake != GPIO_NUM_NC)
+                                              ? ((1ULL << imu_config.io_cs) | (1ULL << imu_config.io_rst) | (1ULL << imu_config.io_wake))
+                                              : ((1ULL << imu_config.io_cs) | (1ULL << imu_config.io_rst));
+    }
 
     outputs_config.mode = GPIO_MODE_OUTPUT;
     outputs_config.pull_down_en = GPIO_PULLDOWN_DISABLE;
@@ -304,13 +318,77 @@ esp_err_t BNO08x::init_gpio()
     if (ret != ESP_OK)
         return ret;
 
-    gpio_set_level(imu_config.io_cs, 1);
-    gpio_set_level(imu_config.io_rst, 1);
+    set_cs_pin(1);
+    set_rst_pin(1);
 
     if (imu_config.io_wake != GPIO_NUM_NC)
         gpio_set_level(imu_config.io_wake, 1);
 
     return ret;
+}
+
+/**
+ * @brief Set CS pin level (abstraction for both direct GPIO and mux mode)
+ *
+ * @param level 0 for low, 1 for high
+ */
+void BNO08x::set_cs_pin(uint8_t level)
+{
+    if (imu_config.mux != nullptr) {
+        // Mux mode - CS is on channels Y0-Y6 (imu_id 0-6)
+        uint8_t cs_channel = get_cs_channel();
+        if (level == 0) {
+            imu_config.mux->set_output_low(cs_channel);
+        } else {
+            imu_config.mux->set_output_high(cs_channel);
+        }
+    } else {
+        // Direct GPIO mode
+        gpio_set_level(imu_config.io_cs, level);
+    }
+}
+
+/**
+ * @brief Set RST pin level (abstraction for both direct GPIO and mux mode)
+ *
+ * @param level 0 for low, 1 for high
+ */
+void BNO08x::set_rst_pin(uint8_t level)
+{
+    if (imu_config.mux != nullptr) {
+        // Mux mode - RST is on channels Y7-Y13 (imu_id 0-6 + offset 7)
+        uint8_t rst_channel = get_rst_channel();
+        if (level == 0) {
+            imu_config.mux->set_output_low(rst_channel);
+        } else {
+            imu_config.mux->set_output_high(rst_channel);
+        }
+    } else {
+        // Direct GPIO mode
+        gpio_set_level(imu_config.io_rst, level);
+    }
+}
+
+/**
+ * @brief Get mux channel for CS pin
+ *
+ * @return Mux channel number (Y0-Y6 for IMU 0-6)
+ */
+uint8_t BNO08x::get_cs_channel() const
+{
+    // CS pins are mapped to Y0-Y6
+    return imu_config.imu_id;
+}
+
+/**
+ * @brief Get mux channel for RST pin
+ *
+ * @return Mux channel number (Y7-Y13 for IMU 0-6)
+ */
+uint8_t BNO08x::get_rst_channel() const
+{
+    // RST pins are mapped to Y7-Y13
+    return imu_config.imu_id + 7;
 }
 
 /**
@@ -741,14 +819,14 @@ bool BNO08x::hard_reset()
     // resetting disables all reports
     xEventGroupClearBits(evt_grp_report_en, EVT_GRP_RPT_ALL_BITS);
 
-    gpio_set_level(imu_config.io_cs, 1);
+    set_cs_pin(1);
 
     if (imu_config.io_wake != GPIO_NUM_NC)
         gpio_set_level(imu_config.io_wake, 1);
 
-    gpio_set_level(imu_config.io_rst, 0); // set reset pin low
+    set_rst_pin(0); // set reset pin low
     vTaskDelay(HARD_RESET_DELAY_MS);      // 10ns min, set to larger delay to let things stabilize(Anton)
-    gpio_set_level(imu_config.io_rst, 1); // bring out of reset
+    set_rst_pin(1); // bring out of reset
 
     // Receive advertisement message on boot (see SH2 Ref. Manual 5.2 & 5.3)
     if (!wait_for_rx_done()) // wait for receive operation to complete
@@ -911,13 +989,13 @@ esp_err_t BNO08x::receive_packet()
     if (gpio_get_level(imu_config.io_int)) // ensure INT pin is low
         return ESP_ERR_INVALID_STATE;
 
-    gpio_set_level(imu_config.io_cs, 0); // assert chip select
+    set_cs_pin(0); // assert chip select
 
     // receive packet header
     ret = receive_packet_header(&packet);
     if (ret != ESP_OK)
     {
-        gpio_set_level(imu_config.io_cs, 1); // de-assert chip select
+        set_cs_pin(1); // de-assert chip select
         return ret;
     }
 
@@ -929,7 +1007,7 @@ esp_err_t BNO08x::receive_packet()
 
     if (packet.length == 0)
     {
-        gpio_set_level(imu_config.io_cs, 1); // de-assert chip select
+        set_cs_pin(1); // de-assert chip select
         return ESP_ERR_INVALID_RESPONSE;
     }
 
@@ -940,7 +1018,7 @@ esp_err_t BNO08x::receive_packet()
         xEventGroupSetBits(evt_grp_spi, EVT_GRP_SPI_RX_DONE_BIT);
     }
 
-    gpio_set_level(imu_config.io_cs, 1); // de-assert chip select
+    set_cs_pin(1); // de-assert chip select
 
     return ret;
 }
@@ -1141,10 +1219,10 @@ void BNO08x::send_packet(bno08x_tx_packet_t* packet)
     spi_transaction.rx_buffer = NULL;
     spi_transaction.flags = 0;
 
-    gpio_set_level(imu_config.io_cs, 0);                    // assert chip select
+    set_cs_pin(0);                                          // assert chip select
     spi_device_polling_transmit(spi_hdl, &spi_transaction); // send data packet
 
-    gpio_set_level(imu_config.io_cs, 1); // de-assert chip select
+    set_cs_pin(1); // de-assert chip select
 
     xEventGroupSetBits(evt_grp_spi, EVT_GRP_SPI_TX_DONE_BIT);
 }
