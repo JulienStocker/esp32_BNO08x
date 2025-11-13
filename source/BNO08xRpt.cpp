@@ -22,7 +22,7 @@ bool BNO08xRpt::rpt_enable(uint32_t time_between_reports, sh2_SensorConfig_t sen
     sensor_cfg.reportInterval_us = time_between_reports;
 
     lock_sh2_HAL();
-    sh2_res = sh2_setSensorConfig(ID, &sensor_cfg);
+    sh2_res = sh2_setSensorConfig(sync_ctx->sh2_instance, ID, &sensor_cfg);
     unlock_sh2_HAL();
 
     if (sh2_res != SH2_OK)
@@ -73,7 +73,7 @@ bool BNO08xRpt::disable(sh2_SensorConfig_t sensor_cfg)
     sensor_cfg.reportInterval_us = 0UL;
 
     lock_sh2_HAL();
-    sh2_res = sh2_setSensorConfig(ID, &sensor_cfg);
+    sh2_res = sh2_setSensorConfig(sync_ctx->sh2_instance, ID, &sensor_cfg);
     unlock_sh2_HAL();
 
     if (sh2_res != SH2_OK)
@@ -154,7 +154,7 @@ bool BNO08xRpt::flush()
     int success = SH2_OK;
 
     lock_sh2_HAL();
-    success = sh2_flush(ID);
+    success = sh2_flush(sync_ctx->sh2_instance, ID);
     unlock_sh2_HAL();
 
     return (success != SH2_OK) ? false : true;
@@ -173,7 +173,7 @@ bool BNO08xRpt::get_sample_counts(bno08x_sample_counts_t& sample_counts)
     sh2_Counts_t pCounts;
 
     lock_sh2_HAL();
-    success = sh2_getCounts(ID, &pCounts);
+    success = sh2_getCounts(sync_ctx->sh2_instance, ID, &pCounts);
     unlock_sh2_HAL();
 
     if (success != SH2_OK)
@@ -197,7 +197,7 @@ bool BNO08xRpt::clear_sample_counts()
     int success = SH2_OK;
 
     lock_sh2_HAL();
-    success = sh2_clearCounts(ID);
+    success = sh2_clearCounts(sync_ctx->sh2_instance, ID);
     unlock_sh2_HAL();
 
     return (success == SH2_OK);
@@ -219,7 +219,7 @@ bool BNO08xRpt::get_meta_data(bno08x_meta_data_t& meta_data)
     sh2_SensorMetadata_t sensor_meta_data;
 
     lock_sh2_HAL();
-    success = sh2_getMetadata(ID, &sensor_meta_data);
+    success = sh2_getMetadata(sync_ctx->sh2_instance, ID, &sensor_meta_data);
     unlock_sh2_HAL();
 
     if (success == SH2_OK)

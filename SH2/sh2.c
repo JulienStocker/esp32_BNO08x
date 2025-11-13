@@ -319,14 +319,56 @@ typedef PACKED_STRUCT {
 // ------------------------------------------------------------------------
 // Private data
 
-// SH2 state
-sh2_t _sh2;
+// SH2 state - Multi-instance support
+#define SH2_MAX_INSTANCES (4)
+static sh2_t _sh2_instances[SH2_MAX_INSTANCES];
+static bool _sh2_instance_used[SH2_MAX_INSTANCES];
+static bool _sh2_initialized = false;
 
 // SH2 Async Event Message
 static sh2_AsyncEvent_t sh2AsyncEvent;
 
 // ------------------------------------------------------------------------
 // Private functions
+
+// Initialize instance management (one-time)
+static void sh2_init_instances(void)
+{
+    if (!_sh2_initialized) {
+        memset(_sh2_instances, 0, sizeof(_sh2_instances));
+        memset(_sh2_instance_used, 0, sizeof(_sh2_instance_used));
+        _sh2_initialized = true;
+    }
+}
+
+// Get an available sh2 instance
+static sh2_t* sh2_get_instance(void)
+{
+    sh2_init_instances();
+
+    for (int i = 0; i < SH2_MAX_INSTANCES; i++) {
+        if (!_sh2_instance_used[i]) {
+            _sh2_instance_used[i] = true;
+            memset(&_sh2_instances[i], 0, sizeof(sh2_t));
+            return &_sh2_instances[i];
+        }
+    }
+    return NULL;  // No instances available
+}
+
+// Release an sh2 instance
+static void sh2_release_instance(sh2_t* pSh2)
+{
+    if (pSh2 == NULL) return;
+
+    for (int i = 0; i < SH2_MAX_INSTANCES; i++) {
+        if (&_sh2_instances[i] == pSh2) {
+            _sh2_instance_used[i] = false;
+            memset(&_sh2_instances[i], 0, sizeof(sh2_t));
+            return;
+        }
+    }
+}
 
 // SH-2 transaction phases
 static int opStart(sh2_t *pSh2, const sh2_Op_t *pOp)
@@ -481,8 +523,8 @@ static int opProcess(sh2_t *pSh2, const sh2_Op_t *pOp)
     uint32_t start_us = 0;
 
     start_us = pSh2->pHal->getTimeUs(pSh2->pHal);
-    
-    status = opStart(&_sh2, pOp);
+
+    status = opStart(pSh2, pOp);
     if (status != SH2_OK) {
         return status;
     }
@@ -1671,7 +1713,8 @@ const sh2_Op_t finishCalOp = {
 // SHTP Event Callback
 
 static void shtpEventCallback(void *cookie, shtp_Event_t shtpEvent) {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)cookie;  // Use instance from cookie
+    if (pSh2 == NULL) return;
 
     sh2AsyncEvent.eventId = SH2_SHTP_EVENT;
     sh2AsyncEvent.shtpEvent = shtpEvent;
@@ -1698,16 +1741,19 @@ static void shtpEventCallback(void *cookie, shtp_Event_t shtpEvent) {
  * @param  eventCookie Will be passed to eventCallback.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_open(sh2_Hal_t *pHal,
+void* sh2_open(sh2_Hal_t *pHal,
              sh2_EventCallback_t *eventCallback, void *eventCookie)
 {
-    sh2_t *pSh2 = &_sh2;
-    
     // Validate parameters
-    if (pHal == 0) return SH2_ERR_BAD_PARAM;
+    if (pHal == 0) return NULL;
 
-    // Clear everything in sh2 structure.
-    memset(&_sh2, 0, sizeof(_sh2));
+    // Get an available sh2 instance
+    sh2_t *pSh2 = sh2_get_instance();
+    if (pSh2 == NULL) {
+        return NULL;  // No instances available
+    }
+
+    // Instance already cleared by sh2_get_instance()
         
     pSh2->resetComplete = false;  // will go true after reset response from SH.
     pSh2->controlChan = 0xFF;  // An invalid value since we don't know yet.
@@ -1722,24 +1768,25 @@ int sh2_open(sh2_Hal_t *pHal,
     // Open SHTP layer
     pSh2->pShtp = shtp_open(pSh2->pHal);
     if (pSh2->pShtp == 0) {
-        // Error opening SHTP
-        return SH2_ERR;
+        // Error opening SHTP, release instance
+        sh2_release_instance(pSh2);
+        return NULL;
     }
 
     // Register SHTP event callback
-    shtp_setEventCallback(pSh2->pShtp, shtpEventCallback, &_sh2);
+    shtp_setEventCallback(pSh2->pShtp, shtpEventCallback, pSh2);
 
     // Register with SHTP
     // Register SH2 handlers
-    shtp_listenAdvert(pSh2->pShtp, GUID_SENSORHUB, sensorhubAdvertHdlr, &_sh2);
-    shtp_listenChan(pSh2->pShtp, GUID_SENSORHUB, "control", sensorhubControlHdlr, &_sh2);
-    shtp_listenChan(pSh2->pShtp, GUID_SENSORHUB, "inputNormal", sensorhubInputNormalHdlr, &_sh2);
-    shtp_listenChan(pSh2->pShtp, GUID_SENSORHUB, "inputWake", sensorhubInputWakeHdlr, &_sh2);
-    shtp_listenChan(pSh2->pShtp, GUID_SENSORHUB, "inputGyroRv", sensorhubInputGyroRvHdlr, &_sh2);
+    shtp_listenAdvert(pSh2->pShtp, GUID_SENSORHUB, sensorhubAdvertHdlr, pSh2);
+    shtp_listenChan(pSh2->pShtp, GUID_SENSORHUB, "control", sensorhubControlHdlr, pSh2);
+    shtp_listenChan(pSh2->pShtp, GUID_SENSORHUB, "inputNormal", sensorhubInputNormalHdlr, pSh2);
+    shtp_listenChan(pSh2->pShtp, GUID_SENSORHUB, "inputWake", sensorhubInputWakeHdlr, pSh2);
+    shtp_listenChan(pSh2->pShtp, GUID_SENSORHUB, "inputGyroRv", sensorhubInputGyroRvHdlr, pSh2);
 
     // Register EXECUTABLE handlers
-    shtp_listenAdvert(pSh2->pShtp, GUID_EXECUTABLE, executableAdvertHdlr, &_sh2);
-    shtp_listenChan(pSh2->pShtp, GUID_EXECUTABLE, "device", executableDeviceHdlr, &_sh2);
+    shtp_listenAdvert(pSh2->pShtp, GUID_EXECUTABLE, executableAdvertHdlr, pSh2);
+    shtp_listenChan(pSh2->pShtp, GUID_EXECUTABLE, "device", executableDeviceHdlr, pSh2);
 
     // Wait for reset notifications to arrive.
     // The client can't talk to the sensor hub until that happens.
@@ -1751,9 +1798,9 @@ int sh2_open(sh2_Hal_t *pHal,
         shtp_service(pSh2->pShtp);
         now_us = pSh2->pHal->getTimeUs(pSh2->pHal);
     }
-    
-    // No errors.
-    return SH2_OK;
+
+    // No errors - return instance handle
+    return (void*)pSh2;
 }
 
 /**
@@ -1762,14 +1809,15 @@ int sh2_open(sh2_Hal_t *pHal,
  * This should be called at the end of a sensor hub session.  
  * The underlying SHTP and HAL instances will be closed.
  */
-void sh2_close(void)
+void sh2_close(void* sh2_instance)
 {
-    sh2_t *pSh2 = &_sh2;
-    
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return;
+
     shtp_close(pSh2->pShtp);
 
-    // Clear everything in sh2 structure.
-    memset(pSh2, 0, sizeof(sh2_t));
+    // Release this instance
+    sh2_release_instance(pSh2);
 }
 
 /**
@@ -1777,10 +1825,11 @@ void sh2_close(void)
  *
  * This function should be called periodically by the host system to service an open sensor hub.
  */
-void sh2_service(void)
+void sh2_service(void* sh2_instance)
 {
-    sh2_t *pSh2 = &_sh2;
-    
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return;
+
     shtp_service(pSh2->pShtp);
 }
 
@@ -1791,9 +1840,10 @@ void sh2_service(void)
  * @param  cookie  A value that will be passed to the sensor callback function.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_setSensorCallback(sh2_SensorCallback_t *callback, void *cookie)
+int sh2_setSensorCallback(void* sh2_instance, sh2_SensorCallback_t *callback, void *cookie)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
     
     pSh2->sensorCallback = callback;
     pSh2->sensorCookie = cookie;
@@ -1806,9 +1856,10 @@ int sh2_setSensorCallback(sh2_SensorCallback_t *callback, void *cookie)
  *
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_devReset(void)
+int sh2_devReset(void* sh2_instance)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     return sendExecutable(pSh2, EXECUTABLE_DEVICE_CMD_RESET);
 }
@@ -1818,9 +1869,10 @@ int sh2_devReset(void)
  *
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_devOn(void)
+int sh2_devOn(void* sh2_instance)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     return sendExecutable(pSh2, EXECUTABLE_DEVICE_CMD_ON);
 }
@@ -1830,9 +1882,10 @@ int sh2_devOn(void)
  *
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_devSleep(void)
+int sh2_devSleep(void* sh2_instance)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     return sendExecutable(pSh2, EXECUTABLE_DEVICE_CMD_SLEEP);
 }
@@ -1843,9 +1896,10 @@ int sh2_devSleep(void)
  * @param  prodIds Pointer to structure that will receive results.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_getProdIds(sh2_ProductIds_t *prodIds)
+int sh2_getProdIds(void* sh2_instance, sh2_ProductIds_t *prodIds)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
     
     // clear opData
     memset(&pSh2->opData, 0, sizeof(sh2_OpData_t));
@@ -1862,9 +1916,10 @@ int sh2_getProdIds(sh2_ProductIds_t *prodIds)
  * @param  config SensorConfig structure to store results.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_getSensorConfig(sh2_SensorId_t sensorId, sh2_SensorConfig_t *pConfig)
+int sh2_getSensorConfig(void* sh2_instance, sh2_SensorId_t sensorId, sh2_SensorConfig_t *pConfig)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
     
     // clear opData
     memset(&pSh2->opData, 0, sizeof(sh2_OpData_t));
@@ -1883,9 +1938,10 @@ int sh2_getSensorConfig(sh2_SensorId_t sensorId, sh2_SensorConfig_t *pConfig)
  * @param  pConfig Pointer to structure holding sensor configuration.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_setSensorConfig(sh2_SensorId_t sensorId, const sh2_SensorConfig_t *pConfig)
+int sh2_setSensorConfig(void* sh2_instance, sh2_SensorId_t sensorId, const sh2_SensorConfig_t *pConfig)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
     
     // clear opData
     memset(&pSh2->opData, 0, sizeof(sh2_OpData_t));
@@ -1904,9 +1960,10 @@ int sh2_setSensorConfig(sh2_SensorId_t sensorId, const sh2_SensorConfig_t *pConf
  * @param  pData Pointer to structure to receive the results.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_getMetadata(sh2_SensorId_t sensorId, sh2_SensorMetadata_t *pData)
+int sh2_getMetadata(void* sh2_instance, sh2_SensorId_t sensorId, sh2_SensorMetadata_t *pData)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
     
     // pData must be non-null
     if (pData == 0) return SH2_ERR_BAD_PARAM;
@@ -1953,9 +2010,10 @@ int sh2_getMetadata(sh2_SensorId_t sensorId, sh2_SensorMetadata_t *pData)
  * @param[out] words Number of 32-bit words retrieved.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_getFrs(uint16_t recordId, uint32_t *pData, uint16_t *words)
+int sh2_getFrs(void* sh2_instance, uint16_t recordId, uint32_t *pData, uint16_t *words)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
     
     if ((pData == 0) || (words == 0)) {
         return SH2_ERR_BAD_PARAM;
@@ -1980,9 +2038,10 @@ int sh2_getFrs(uint16_t recordId, uint32_t *pData, uint16_t *words)
  * @param  words number of 32-bit words to write.  (0 to delete record.)
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_setFrs(uint16_t recordId, uint32_t *pData, uint16_t words)
+int sh2_setFrs(void* sh2_instance, uint16_t recordId, uint32_t *pData, uint16_t words)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
     
     if ((pData == 0) && (words != 0)) {
         return SH2_ERR_BAD_PARAM;
@@ -2006,9 +2065,10 @@ int sh2_setFrs(uint16_t recordId, uint32_t *pData, uint16_t words)
  * @param  numErrors size of pErrors array
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_getErrors(uint8_t severity, sh2_ErrorRecord_t *pErrors, uint16_t *numErrors)
+int sh2_getErrors(void* sh2_instance, uint8_t severity, sh2_ErrorRecord_t *pErrors, uint16_t *numErrors)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
     
     // clear opData
     memset(&pSh2->opData, 0, sizeof(sh2_OpData_t));
@@ -2027,9 +2087,10 @@ int sh2_getErrors(uint8_t severity, sh2_ErrorRecord_t *pErrors, uint16_t *numErr
  * @param  pCounts Pointer to Counts structure that will receive data.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_getCounts(sh2_SensorId_t sensorId, sh2_Counts_t *pCounts)
+int sh2_getCounts(void* sh2_instance, sh2_SensorId_t sensorId, sh2_Counts_t *pCounts)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
     
     // clear opData
     memset(&pSh2->opData, 0, sizeof(sh2_OpData_t));
@@ -2046,9 +2107,10 @@ int sh2_getCounts(sh2_SensorId_t sensorId, sh2_Counts_t *pCounts)
  * @param  sensorId which sensor to operate on.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_clearCounts(sh2_SensorId_t sensorId)
+int sh2_clearCounts(void* sh2_instance, sh2_SensorId_t sensorId)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     // clear opData
     memset(&pSh2->opData, 0, sizeof(sh2_OpData_t));
@@ -2068,10 +2130,11 @@ int sh2_clearCounts(sh2_SensorId_t sensorId)
  * @param  basis Which rotation vector to use as the basis for Tare adjustment.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_setTareNow(uint8_t axes,    // SH2_TARE_X | SH2_TARE_Y | SH2_TARE_Z
+int sh2_setTareNow(void* sh2_instance, uint8_t axes,    // SH2_TARE_X | SH2_TARE_Y | SH2_TARE_Z
                    sh2_TareBasis_t basis)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     // clear opData
     memset(&pSh2->opData, 0, sizeof(sh2_OpData_t));
@@ -2090,9 +2153,10 @@ int sh2_setTareNow(uint8_t axes,    // SH2_TARE_X | SH2_TARE_Y | SH2_TARE_Z
  *
  * @return SH2_OK \n");
  */
-int sh2_clearTare(void)
+int sh2_clearTare(void* sh2_instance)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     // clear opData
     memset(&pSh2->opData, 0, sizeof(sh2_OpData_t));
@@ -2109,9 +2173,10 @@ int sh2_clearTare(void)
  *
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_persistTare(void)
+int sh2_persistTare(void* sh2_instance)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     // clear opData
     memset(&pSh2->opData, 0, sizeof(sh2_OpData_t));
@@ -2129,9 +2194,10 @@ int sh2_persistTare(void)
  * @param  orientation Quaternion rotation vector to apply as new tare.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_setReorientation(sh2_Quaternion_t *orientation)
+int sh2_setReorientation(void* sh2_instance, sh2_Quaternion_t *orientation)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     // clear opData
     memset(&pSh2->opData, 0, sizeof(sh2_OpData_t));
@@ -2157,9 +2223,10 @@ int sh2_setReorientation(sh2_Quaternion_t *orientation)
  *
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_reinitialize(void)
+int sh2_reinitialize(void* sh2_instance)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     return opProcess(pSh2, &reinitOp);
 }
@@ -2169,9 +2236,10 @@ int sh2_reinitialize(void)
  *
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_saveDcdNow(void)
+int sh2_saveDcdNow(void* sh2_instance)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     return opProcess(pSh2, &saveDcdNowOp);
 }
@@ -2182,9 +2250,10 @@ int sh2_saveDcdNow(void)
  * @param  pOscType pointer to data structure to receive results.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_getOscType(sh2_OscType_t *pOscType)
+int sh2_getOscType(void* sh2_instance, sh2_OscType_t *pOscType)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     pSh2->opData.getOscType.pOscType = pOscType;
 
@@ -2197,9 +2266,10 @@ int sh2_getOscType(sh2_OscType_t *pOscType)
  * @param  sensors Bit mask to configure which sensors are affected.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_setCalConfig(uint8_t sensors)
+int sh2_setCalConfig(void* sh2_instance, uint8_t sensors)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     pSh2->opData.calConfig.sensors = sensors;
 
@@ -2212,9 +2282,10 @@ int sh2_setCalConfig(uint8_t sensors)
  * @param  pSensors pointer to Bit mask, set on return.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_getCalConfig(uint8_t *pSensors)
+int sh2_getCalConfig(void* sh2_instance, uint8_t *pSensors)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     pSh2->opData.getCalConfig.pSensors = pSensors;
 
@@ -2227,9 +2298,10 @@ int sh2_getCalConfig(uint8_t *pSensors)
  * @param  enabled Enable or Disable DCD auto-save.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_setDcdAutoSave(bool enabled)
+int sh2_setDcdAutoSave(void* sh2_instance, bool enabled)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     // clear opData
     memset(&pSh2->opData, 0, sizeof(sh2_OpData_t));
@@ -2246,9 +2318,10 @@ int sh2_setDcdAutoSave(bool enabled)
  * @param  sensorId Which sensor reports to flush.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_flush(sh2_SensorId_t sensorId)
+int sh2_flush(void* sh2_instance, sh2_SensorId_t sensorId)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     // clear opData
     memset(&pSh2->opData, 0, sizeof(sh2_OpData_t));
@@ -2263,9 +2336,10 @@ int sh2_flush(sh2_SensorId_t sensorId)
  *
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_clearDcdAndReset(void)
+int sh2_clearDcdAndReset(void* sh2_instance)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     // clear opData
     memset(&pSh2->opData, 0, sizeof(sh2_OpData_t));
@@ -2281,9 +2355,10 @@ int sh2_clearDcdAndReset(void)
  * @parameter interval_us sensor report interval, uS.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_startCal(uint32_t interval_us)
+int sh2_startCal(void* sh2_instance, uint32_t interval_us)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     // clear opData
     memset(&pSh2->opData, 0, sizeof(sh2_OpData_t));
@@ -2299,9 +2374,10 @@ int sh2_startCal(uint32_t interval_us)
  * @parameter status contains calibration status code on return.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_finishCal(sh2_CalStatus_t *status)
+int sh2_finishCal(void* sh2_instance, sh2_CalStatus_t *status)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     // clear opData
     memset(&pSh2->opData, 0, sizeof(sh2_OpData_t));
@@ -2315,9 +2391,10 @@ int sh2_finishCal(sh2_CalStatus_t *status)
  * @parameter intent Inform the sensor hub what sort of motion should be in progress.
  * @return SH2_OK (0), on success.  Negative value from sh2_err.h on error.
  */
-int sh2_setIZro(sh2_IZroMotionIntent_t intent)
+int sh2_setIZro(void* sh2_instance, sh2_IZroMotionIntent_t intent)
 {
-    sh2_t *pSh2 = &_sh2;
+    sh2_t *pSh2 = (sh2_t*)sh2_instance;
+    if (pSh2 == NULL) return SH2_ERR_BAD_PARAM;
 
     // clear opData
     memset(&pSh2->opData, 0, sizeof(sh2_OpData_t));

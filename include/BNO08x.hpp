@@ -199,7 +199,8 @@ class BNO08x
 
         esp_err_t re_enable_reports();
 
-        sh2_Hal_t sh2_HAL; ///< sh2 hardware abstraction layer struct for use with sh2 HAL lib.
+        bno08x_sh2_hal_t sh2_HAL_wrapper; ///< sh2 hardware abstraction layer wrapper with instance pointer
+        void* sh2_instance;                 ///< sh2 instance handle returned from sh2_open()
 
         QueueHandle_t
                 queue_rx_sensor_event; ///< Queue to send sensor events from sh2 HAL sensor event callback (BNO08xSH2HAL::sensor_event_cb()) to data_proc_task()

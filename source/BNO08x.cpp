@@ -5,6 +5,9 @@
 
 #include "BNO08x.hpp"
 #include "BNO08xPrivateTypes.hpp"
+#include "esp_log.h"
+#include "freertos/idf_additions.h"
+#include "freertos/projdefs.h"
 
 using namespace BNO08xPrivateTypes;
 
@@ -23,6 +26,7 @@ BNO08x::BNO08x(bno08x_config_t imu_config)
     , sh2_HAL_service_task_hdl(NULL)
     , cb_task_hdl(NULL)
     , sem_kill_tasks(NULL)
+    , sh2_instance(NULL)
     , queue_rx_sensor_event(xQueueCreate(10, sizeof(sh2_SensorEvent_t)))
     , queue_cb_report_id(xQueueCreate(CONFIG_ESP32_BNO08X_CB_QUEUE_SZ, sizeof(uint8_t)))
     , imu_config(imu_config)
@@ -83,27 +87,33 @@ bool BNO08x::initialize()
 
     // initialize configuration arguments
     if (init_config_args() != ESP_OK)
-        return false;
+    return false;
 
+ESP_LOGW(TAG, "made it her:");
     // initialize GPIO
     if (init_gpio() != ESP_OK)
         return false;
+ESP_LOGW(TAG, "made it her1");
 
     // initialize HINT ISR
     if (init_hint_isr() != ESP_OK)
         return false;
+ESP_LOGW(TAG, "made it her2");
 
     // initialize SPI
     if (init_spi() != ESP_OK)
         return false;
+ESP_LOGW(TAG, "made it her3");
 
     // initialize SH2 HAL
     if (init_sh2_HAL() != ESP_OK)
         return false;
+ESP_LOGW(TAG, "made it her4");
 
     // initialize tasks
     if (init_tasks() != ESP_OK)
         return false;
+ESP_LOGW(TAG, "made it her5");
 
     // clang-format off
     #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
@@ -211,7 +221,7 @@ void BNO08x::sh2_HAL_service_task()
         if (evt_grp_bno08x_task_bits & EVT_GRP_BNO08x_TASK_HINT_ASSRT_BIT)
         {
             lock_sh2_HAL();
-            sh2_service();
+            sh2_service(sh2_instance);
             unlock_sh2_HAL();
         }
 
@@ -571,6 +581,7 @@ esp_err_t BNO08x::init_gpio()
         return ret;
 
     gpio_set_level(imu_config.io_cs, 1);
+    vTaskDelay(pdMS_TO_TICKS(1) );
     gpio_set_level(imu_config.io_rst, 1);
 
     return ret;
@@ -722,13 +733,28 @@ esp_err_t BNO08x::init_spi()
     ret = spi_bus_initialize(imu_config.spi_peripheral, &bus_config, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK)
     {
-        // clang-format off
-        #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Initialization failed, SPI bus failed to initialize.");
-        #endif
-        // clang-format on
+        // ESP_ERR_INVALID_STATE means the bus is already initialized (shared bus scenario)
+        if (ret == ESP_ERR_INVALID_STATE)
+        {
+            // clang-format off
+            #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+            ESP_LOGI(TAG, "SPI bus already initialized (shared bus), skipping bus initialization.");
+            #endif
+            // clang-format on
 
-        return ret;
+            // This is OK - the bus was initialized by another device
+            init_status.spi_bus = false; // We didn't initialize it, so don't try to free it later
+        }
+        else
+        {
+            // clang-format off
+            #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+            ESP_LOGE(TAG, "Initialization failed, SPI bus failed to initialize.");
+            #endif
+            // clang-format on
+
+            return ret;
+        }
     }
     else
     {
@@ -761,20 +787,22 @@ esp_err_t BNO08x::init_spi()
  */
 esp_err_t BNO08x::init_sh2_HAL()
 {
-    // use this IMU in sh2 HAL callbacks
-    BNO08xSH2HAL::set_hal_imu(this);
-
-    // register sh2 HAL callbacks
-    sh2_HAL.open = BNO08xSH2HAL::spi_open;
-    sh2_HAL.close = BNO08xSH2HAL::spi_close;
-    sh2_HAL.read = BNO08xSH2HAL::spi_read;
-    sh2_HAL.write = BNO08xSH2HAL::spi_write;
-    sh2_HAL.getTimeUs = BNO08xSH2HAL::get_time_us;
+    // Setup sh2 HAL wrapper with this instance
+    sh2_HAL_wrapper.instance = this;
+    sh2_HAL_wrapper.hal.open = BNO08xSH2HAL::spi_open;
+    sh2_HAL_wrapper.hal.close = BNO08xSH2HAL::spi_close;
+    sh2_HAL_wrapper.hal.read = BNO08xSH2HAL::spi_read;
+    sh2_HAL_wrapper.hal.write = BNO08xSH2HAL::spi_write;
+    sh2_HAL_wrapper.hal.getTimeUs = BNO08xSH2HAL::get_time_us;
 
     // reset BNO08x
+    ESP_LOGW(TAG, "reset");
     toggle_reset();
 
-    if (sh2_open(&sh2_HAL, BNO08xSH2HAL::hal_cb, NULL) != SH2_OK)
+    // Open sh2 session - returns instance handle
+    ESP_LOGW(TAG, "sh2");
+    sh2_instance = sh2_open(&sh2_HAL_wrapper.hal, BNO08xSH2HAL::hal_cb, this);
+    if (sh2_instance == NULL)
     {
         // clang-format off
         #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
@@ -785,11 +813,14 @@ esp_err_t BNO08x::init_sh2_HAL()
         return ESP_FAIL;
     }
 
+    // Store sh2_instance in sync context for reports to access
+    sync_ctx.sh2_instance = sh2_instance;
+
     init_status.sh2_HAL = true;
 
     memset(&product_IDs, 0, sizeof(sh2_ProductIds_t));
 
-    if (sh2_getProdIds(&product_IDs) != SH2_OK)
+    if (sh2_getProdIds(sh2_instance, &product_IDs) != SH2_OK)
     {
         // clang-format off
         #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
@@ -802,11 +833,11 @@ esp_err_t BNO08x::init_sh2_HAL()
 
     // clang-format off
     #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-    print_product_ids(); 
+    print_product_ids();
     #endif
     // clang-format on
 
-    if (sh2_setSensorCallback(BNO08xSH2HAL::sensor_event_cb, NULL) != SH2_OK)
+    if (sh2_setSensorCallback(sh2_instance, BNO08xSH2HAL::sensor_event_cb, this) != SH2_OK)
         return ESP_FAIL;
 
     return ESP_OK;
@@ -1047,7 +1078,7 @@ esp_err_t BNO08x::deinit_sh2_HAL()
     if (init_status.sh2_HAL)
     {
         init_status.sh2_HAL = false;
-        sh2_close();
+        sh2_close(sh2_instance);
     }
 
     return ESP_OK;
@@ -1068,7 +1099,7 @@ bool BNO08x::hard_reset()
     {
         // run service to dispatch callbacks
         lock_sh2_HAL();
-        sh2_service();
+        sh2_service(sh2_instance);
         unlock_sh2_HAL();
 
         // get product ids and check reset reason
@@ -1108,7 +1139,7 @@ bool BNO08x::soft_reset()
 
     // send reset command
     lock_sh2_HAL();
-    op_success = sh2_devReset();
+    op_success = sh2_devReset(sh2_instance);
     unlock_sh2_HAL();
 
     if (op_success == SH2_OK)
@@ -1118,7 +1149,7 @@ bool BNO08x::soft_reset()
         {
             // run service to dispatch callbacks
             lock_sh2_HAL();
-            sh2_service();
+            sh2_service(sh2_instance);
             unlock_sh2_HAL();
 
             if (get_reset_reason() == BNO08xResetReason::EXT_RST)
@@ -1211,7 +1242,7 @@ BNO08xResetReason BNO08x::get_reset_reason()
 
     memset(&product_IDs, 0, sizeof(sh2_ProductIds_t));
     lock_sh2_HAL();
-    op_success = sh2_getProdIds(&product_IDs);
+    op_success = sh2_getProdIds(sh2_instance, &product_IDs);
     unlock_sh2_HAL();
 
     if (op_success == SH2_OK)
@@ -1240,7 +1271,7 @@ bool BNO08x::on()
     int op_success = SH2_ERR;
 
     lock_sh2_HAL();
-    op_success = sh2_devOn();
+    op_success = sh2_devOn(sh2_instance);
     unlock_sh2_HAL();
 
     return (op_success == SH2_OK);
@@ -1257,7 +1288,7 @@ bool BNO08x::sleep()
     int op_success = SH2_ERR;
 
     lock_sh2_HAL();
-    op_success = sh2_devSleep();
+    op_success = sh2_devSleep(sh2_instance);
     unlock_sh2_HAL();
 
     return (op_success == SH2_OK);
@@ -1283,7 +1314,7 @@ bool BNO08x::calibration_turntable_start(uint32_t period_us)
     int op_success = SH2_ERR;
 
     lock_sh2_HAL();
-    op_success = sh2_startCal(period_us);
+    op_success = sh2_startCal(sh2_instance, period_us);
     unlock_sh2_HAL();
 
     return (op_success == SH2_OK);
@@ -1302,7 +1333,7 @@ bool BNO08x::calibration_turntable_start(uint32_t period_us)
     int op_success = SH2_ERR;
 
     lock_sh2_HAL();
-    op_success = sh2_finishCal(&status);
+    op_success = sh2_finishCal(sh2_instance, &status);
     unlock_sh2_HAL();
 
     return (op_success == SH2_OK);
@@ -1321,7 +1352,7 @@ bool BNO08x::dynamic_calibration_enable(BNO08xCalSel sensor)
     int op_success = SH2_ERR;
 
     lock_sh2_HAL();
-    op_success = sh2_setCalConfig(static_cast<uint8_t>(sensor));
+    op_success = sh2_setCalConfig(sh2_instance, static_cast<uint8_t>(sensor));
     unlock_sh2_HAL();
 
     return (op_success == SH2_OK);
@@ -1341,7 +1372,7 @@ bool BNO08x::dynamic_calibration_disable(BNO08xCalSel sensor)
     uint8_t active_sensors = 0U;
 
     lock_sh2_HAL();
-    op_success = sh2_getCalConfig(&active_sensors);
+    op_success = sh2_getCalConfig(sh2_instance, &active_sensors);
     unlock_sh2_HAL();
 
     if (op_success == SH2_OK)
@@ -1349,7 +1380,7 @@ bool BNO08x::dynamic_calibration_disable(BNO08xCalSel sensor)
         active_sensors &= ~static_cast<uint8_t>(sensor);
 
         lock_sh2_HAL();
-        op_success = sh2_setCalConfig(active_sensors);
+        op_success = sh2_setCalConfig(sh2_instance, active_sensors);
         unlock_sh2_HAL();
     }
 
@@ -1367,7 +1398,7 @@ bool BNO08x::dynamic_calibration_autosave_enable()
     int op_success = SH2_ERR;
 
     lock_sh2_HAL();
-    op_success = sh2_setDcdAutoSave(true);
+    op_success = sh2_setDcdAutoSave(sh2_instance, true);
     unlock_sh2_HAL();
 
     return (op_success == SH2_OK);
@@ -1384,7 +1415,7 @@ bool BNO08x::dynamic_calibration_autosave_disable()
     int op_success = SH2_ERR;
 
     lock_sh2_HAL();
-    op_success = sh2_setDcdAutoSave(false);
+    op_success = sh2_setDcdAutoSave(sh2_instance, false);
     unlock_sh2_HAL();
 
     return (op_success == SH2_OK);
@@ -1401,7 +1432,7 @@ bool BNO08x::dynamic_calibration_save()
     int op_success = SH2_ERR;
 
     lock_sh2_HAL();
-    op_success = sh2_saveDcdNow();
+    op_success = sh2_saveDcdNow(sh2_instance);
     unlock_sh2_HAL();
 
     return (op_success == SH2_OK);
@@ -1419,7 +1450,7 @@ bool BNO08x::dynamic_calibration_data_clear_ram()
 
     // send clear DCD and reset command
     lock_sh2_HAL();
-    op_success = sh2_clearDcdAndReset();
+    op_success = sh2_clearDcdAndReset(sh2_instance);
     unlock_sh2_HAL();
 
     if (op_success == SH2_OK)
@@ -1429,7 +1460,7 @@ bool BNO08x::dynamic_calibration_data_clear_ram()
         {
             // run service to dispatch callbacks
             lock_sh2_HAL();
-            sh2_service();
+            sh2_service(sh2_instance);
             unlock_sh2_HAL();
 
             if (get_reset_reason() == BNO08xResetReason::EXT_RST)
@@ -1729,7 +1760,7 @@ bool BNO08x::get_frs(BNO08xFrsID frs_ID, uint32_t (&data)[16], uint16_t& rx_data
     int op_success = SH2_ERR;
 
     lock_sh2_HAL();
-    op_success = sh2_getFrs(static_cast<uint16_t>(frs_ID), data, &rx_data_sz);
+    op_success = sh2_getFrs(sh2_instance, static_cast<uint16_t>(frs_ID), data, &rx_data_sz);
     unlock_sh2_HAL();
 
     if (op_success != SH2_OK)
@@ -1762,7 +1793,7 @@ bool BNO08x::write_frs(BNO08xFrsID frs_ID, uint32_t *data, const uint16_t tx_dat
     int op_success = SH2_ERR;
 
     lock_sh2_HAL();
-    op_success = sh2_setFrs(static_cast<uint16_t>(frs_ID), data, tx_data_sz);
+    op_success = sh2_setFrs(sh2_instance, static_cast<uint16_t>(frs_ID), data, tx_data_sz);
     unlock_sh2_HAL();
 
     if (op_success != SH2_OK)
@@ -1955,8 +1986,8 @@ void BNO08x::print_product_ids()
                 "                SW Build Number:  0x%" PRIx32 "\n\r"
                 "                SW Version Patch: 0x%" PRIx16 "\n\r"
                 "                ---------------------------\n\r",
-                i, product_IDs.entry->swPartNumber, product_IDs.entry->swVersionMajor, product_IDs.entry->swVersionMinor,
-                product_IDs.entry->swBuildNumber, product_IDs.entry->swVersionPatch);
+                i, product_IDs.entry[i].swPartNumber, product_IDs.entry[i].swVersionMajor, product_IDs.entry[i].swVersionMinor,
+                product_IDs.entry[i].swBuildNumber, product_IDs.entry[i].swVersionPatch);
     }
 }
 

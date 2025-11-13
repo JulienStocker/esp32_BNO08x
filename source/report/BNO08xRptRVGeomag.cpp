@@ -47,7 +47,7 @@ bool BNO08xRptRVGeomag::tare_persist()
     int success = SH2_ERR;
 
     lock_sh2_HAL();
-    success = sh2_persistTare();
+    success = sh2_persistTare(sync_ctx->sh2_instance);
     unlock_sh2_HAL();
 
     if (success != SH2_OK)
@@ -64,6 +64,6 @@ bool BNO08xRptRVGeomag::tare_persist()
 void BNO08xRptRVGeomag::tare_clear()
 {
     lock_sh2_HAL();
-    sh2_clearTare();
+    sh2_clearTare(sync_ctx->sh2_instance);
     unlock_sh2_HAL();
 }

@@ -87,7 +87,7 @@ bool BNO08xRptRVGeneric::tare(bool x, bool y, bool z, sh2_TareBasis_t basis)
         axis_flag |= SH2_TARE_Z;
 
     lock_sh2_HAL();
-    success = sh2_setTareNow(axis_flag, basis);
+    success = sh2_setTareNow(sync_ctx->sh2_instance, axis_flag, basis);
     unlock_sh2_HAL();
 
     if (success != SH2_OK)

@@ -64,15 +64,23 @@
 class BNO08x;
 
 /**
+ * @brief Wrapper structure for sh2_Hal_t that includes BNO08x instance pointer
+ * This allows callbacks to access the specific BNO08x instance
+ */
+typedef struct {
+    sh2_Hal_t hal;      // Must be first member (for pointer casting)
+    BNO08x* instance;   // Pointer to the BNO08x instance
+} bno08x_sh2_hal_t;
+
+/**
  * @class BNO08xSH2HAL
  *
- * @brief Fully static class containing callback implementations for sh2 HAL lib.
+ * @brief Static class containing callback implementations for sh2 HAL lib.
+ * Uses instance pointers from hal wrapper instead of global state.
  * */
 class BNO08xSH2HAL
 {
     public:
-        static void set_hal_imu(BNO08x* hal_imu);
-
         static int spi_open(sh2_Hal_t* self);
         static void spi_close(sh2_Hal_t* self);
         static int spi_read(sh2_Hal_t* self, uint8_t* pBuffer, unsigned len, uint32_t* t_us);
@@ -82,11 +90,10 @@ class BNO08xSH2HAL
         static void sensor_event_cb(void* cookie, sh2_SensorEvent_t* event);
 
     private:
-        static BNO08x* imu;
-        static void hardware_reset();
-        static bool spi_wait_for_int();
-        static uint16_t spi_read_sh2_packet_header(uint8_t* pBuffer);
-        static int spi_read_sh2_packet_body(uint8_t* pBuffer, uint16_t packet_sz);
+        static void hardware_reset(BNO08x* imu);
+        static bool spi_wait_for_int(BNO08x* imu);
+        static uint16_t spi_read_sh2_packet_header(BNO08x* imu, uint8_t* pBuffer);
+        static int spi_read_sh2_packet_body(BNO08x* imu, uint8_t* pBuffer, uint16_t packet_sz);
 
         static const constexpr char* TAG = "BNO08xSH2HAL";
 };

@@ -55,6 +55,7 @@ namespace BNO08xPrivateTypes
     /// @brief Holds context used to synchronize tasks and callback execution.
     typedef struct bno08x_sync_ctx_t
     {
+            void* sh2_instance;                                  ///< Pointer to sh2 instance handle for multi-sensor support
             SemaphoreHandle_t sh2_HAL_lock; ///<Mutex to prevent sh2 HAL lib functions from being accessed at same time.
             SemaphoreHandle_t
                     data_lock; ///<Mutex to prevent user from reading data while data_proc_task() updates it, and vice versa.
@@ -66,7 +67,8 @@ namespace BNO08xPrivateTypes
             bno08x_cb_list_t cb_list;                            ///< Vector to contain registered callbacks.
 
             bno08x_sync_ctx_t()
-                : sh2_HAL_lock(xSemaphoreCreateMutex())
+                : sh2_instance(NULL)
+                , sh2_HAL_lock(xSemaphoreCreateMutex())
                 , data_lock(xSemaphoreCreateMutex())
                 , evt_grp_rpt_en(xEventGroupCreate())
                 , evt_grp_rpt_data_available(xEventGroupCreate())
