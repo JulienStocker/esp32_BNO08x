@@ -72,48 +72,58 @@ enum class BNO08xStability
 /// @brief IMU configuration settings passed into constructor
 typedef struct bno08x_config_t
 {
-        spi_host_device_t spi_peripheral; ///<SPI peripheral to be used
+        spi_host_device_t spi_host;       ///<SPI peripheral to be used
         gpio_num_t io_mosi;               ///<MOSI GPIO pin (connects to BNO08x DI pin)
         gpio_num_t io_miso;               ///<MISO GPIO pin (connects to BNO08x SDA pin)
         gpio_num_t io_sclk;               ///<SCLK pin (connects to BNO08x SCL pin)
-        gpio_num_t io_cs;                 /// Chip select pin (connects to BNO08x CS pin)
-        gpio_num_t io_int;                /// Host interrupt pin (connects to BNO08x INT pin)
-        gpio_num_t io_rst;                /// Reset pin (connects to BNO08x RST pin)
+        gpio_num_t io_cs;                 ///<Chip select pin (connects to BNO08x CS pin)
+        gpio_num_t io_int;                ///<Host interrupt pin (connects to BNO08x INT pin)
+        gpio_num_t io_rst;                ///<Reset pin (connects to BNO08x RST pin)
         gpio_num_t io_wake;               ///<Wake pin (optional, connects to BNO08x P0)
         uint32_t sclk_speed;              ///<Desired SPI SCLK speed in Hz (max 3MHz)
-        bool install_isr_service; ///<Indicates whether the ISR service for the HINT should be installed at IMU initialization, (if gpio_install_isr_service() is called before initialize() set this to false)
+        bool install_isr_service;         ///<Indicates whether the ISR service for the HINT should be installed at IMU initialization
 
-        /// @brief Default IMU configuration settings constructor.
-        /// To modify default GPIO pins, run "idf.py menuconfig" esp32_BNO08x->GPIO Configuration.
-        /// Alternatively, edit the default values in "Kconfig.projbuild"
-        bno08x_config_t(bool install_isr_service = true)
-            : spi_peripheral((spi_host_device_t) CONFIG_ESP32_BNO08x_SPI_HOST)
-            , io_mosi(static_cast<gpio_num_t>(CONFIG_ESP32_BNO08X_GPIO_DI))       // default: 23
-            , io_miso(static_cast<gpio_num_t>(CONFIG_ESP32_BNO08X_GPIO_SDA))      // default: 19
-            , io_sclk(static_cast<gpio_num_t>(CONFIG_ESP32_BNO08X_GPIO_SCL))      // default: 18
-            , io_cs(static_cast<gpio_num_t>(CONFIG_ESP32_BNO08X_GPIO_CS))         // default: 33
-            , io_int(static_cast<gpio_num_t>(CONFIG_ESP32_BNO08X_GPIO_HINT))      // default: 26
-            , io_rst(static_cast<gpio_num_t>(CONFIG_ESP32_BNO08X_GPIO_RST))       // default: 32
-            , io_wake(static_cast<gpio_num_t>(CONFIG_ESP32_BNO08X_GPIO_WAKE))     // default: -1 (unused)
-            , sclk_speed(static_cast<uint32_t>(CONFIG_ESP32_BNO08X_SCL_SPEED_HZ)) // default: 2MHz
-            , install_isr_service(install_isr_service)                            // default: true
+        // ─────────────────────────────────────────────
+        // NEW: Mux-aware CS support
+        // ─────────────────────────────────────────────
+        bool use_mux;          ///< true if external SN74HC138 controls CS
+        gpio_num_t mux_pin_a;  ///< SN74HC138 A input
+        gpio_num_t mux_pin_b;  ///< SN74HC138 B input
+        gpio_num_t mux_pin_c;  ///< SN74HC138 C input
+        uint8_t mux_channel;   ///< 0–7: Y0–Y7 output that goes to this IMU CS
 
-        {
-        }
-
-        /// @brief Overloaded IMU configuration settings constructor for custom pin settings
-        bno08x_config_t(spi_host_device_t spi_peripheral, gpio_num_t io_mosi, gpio_num_t io_miso, gpio_num_t io_sclk, gpio_num_t io_cs,
-                gpio_num_t io_int, gpio_num_t io_rst, gpio_num_t io_wake, uint32_t sclk_speed, bool install_isr_service = true)
-            : spi_peripheral(spi_peripheral)
-            , io_mosi(io_mosi)
-            , io_miso(io_miso)
-            , io_sclk(io_sclk)
-            , io_cs(io_cs)
-            , io_int(io_int)
-            , io_rst(io_rst)
-            , io_wake(io_wake)
-            , sclk_speed(sclk_speed)
-            , install_isr_service(install_isr_service)
+        /// @brief IMU configuration settings constructor
+        bno08x_config_t(
+                spi_host_device_t host = SPI2_HOST,
+                gpio_num_t mosi = GPIO_NUM_NC,
+                gpio_num_t miso = GPIO_NUM_NC,
+                gpio_num_t sclk = GPIO_NUM_NC,
+                gpio_num_t cs   = GPIO_NUM_NC,
+                gpio_num_t intr = GPIO_NUM_NC,
+                gpio_num_t rst  = GPIO_NUM_NC,
+                gpio_num_t wake = GPIO_NUM_NC,
+                uint32_t sclk_hz = 1000000UL,
+                bool install_isr = true,
+                bool use_mux_    = false,
+                gpio_num_t mux_a_ = GPIO_NUM_NC,
+                gpio_num_t mux_b_ = GPIO_NUM_NC,
+                gpio_num_t mux_c_ = GPIO_NUM_NC,
+                uint8_t mux_ch_   = 0)
+            : spi_host(host)
+            , io_mosi(mosi)
+            , io_miso(miso)
+            , io_sclk(sclk)
+            , io_cs(cs)
+            , io_int(intr)
+            , io_rst(rst)
+            , io_wake(wake)
+            , sclk_speed(sclk_hz)
+            , install_isr_service(install_isr)
+            , use_mux(use_mux_)
+            , mux_pin_a(mux_a_)
+            , mux_pin_b(mux_b_)
+            , mux_pin_c(mux_c_)
+            , mux_channel(mux_ch_)
         {
         }
 } bno08x_config_t;

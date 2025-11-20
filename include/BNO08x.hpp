@@ -559,5 +559,21 @@ class BNO08x
 
         static const constexpr char* TAG = "BNO08x"; ///< Class tag used for serial print statements
 
+        // ─────────────────────────────────────────────
+        // NEW: Shared SPI + mux coordination
+        // ─────────────────────────────────────────────
+        static SemaphoreHandle_t spi_bus_mutex;   ///< protects SPI bus + mux across all instances
+        static bool mux_pins_initialized;         ///< true once A/B/C pins are configured
+        esp_err_t init_mux_pins_if_needed();
+        inline bool use_mux() const
+        {
+            return imu_config.use_mux &&
+                   imu_config.mux_pin_a != GPIO_NUM_NC &&
+                   imu_config.mux_pin_b != GPIO_NUM_NC &&
+                   imu_config.mux_pin_c != GPIO_NUM_NC;
+        }
+        void select_device();   ///< Acquire mutex, select mux channel, pull CS low (if any)
+        void deselect_device(); ///< Release CS / mux and give back mutex
+
         friend class BNO08xTestHelper; // allow test helper to access private members for unit tests
 };

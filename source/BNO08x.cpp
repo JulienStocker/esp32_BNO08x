@@ -1,6 +1,12 @@
 #include "BNO08x.hpp"
 #include "BNO08x_macros.hpp"
 
+// ─────────────────────────────────────────────
+// Static members for shared SPI + mux
+// ─────────────────────────────────────────────
+SemaphoreHandle_t BNO08x::spi_bus_mutex = nullptr;
+bool BNO08x::mux_pins_initialized = false;
+
 /**
  * @brief BNO08x imu constructor.
  *
@@ -73,6 +79,34 @@ BNO08x::~BNO08x()
  */
 bool BNO08x::initialize()
 {
+    esp_err_t ret = ESP_OK;
+
+    // Ensure shared SPI bus mutex exists
+    if (spi_bus_mutex == nullptr)
+    {
+        spi_bus_mutex = xSemaphoreCreateMutex();
+        if (spi_bus_mutex == nullptr)
+        {
+#ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+            ESP_LOGE(TAG, "Failed to create SPI bus mutex");
+#endif
+            return false;
+        }
+    }
+
+    // Initialize mux pins once, if this IMU uses the mux
+    if (use_mux())
+    {
+        ret = init_mux_pins_if_needed();
+        if (ret != ESP_OK)
+        {
+#ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+            ESP_LOGE(TAG, "Failed to initialize mux pins (err=0x%x)", ret);
+#endif
+            return false;
+        }
+    }
+
     // initialize configuration arguments
     if (init_config_args() != ESP_OK)
         return false;
@@ -123,16 +157,25 @@ bool BNO08x::initialize()
  */
 esp_err_t BNO08x::init_config_args()
 {
-    if ((imu_config.io_cs == GPIO_NUM_NC))
+    // Allow mux/external chip select when io_cs = GPIO_NUM_NC
+    if (imu_config.io_cs == GPIO_NUM_NC)
     {
-        // clang-format off
-        #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Initialization failed, CS GPIO cannot be unassigned.");
-        #endif
-        // clang-format on
-
-        return ESP_ERR_INVALID_ARG;
+    #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+        ESP_LOGW(TAG, "Using external chip select (GPIO_NUM_NC). CS will not be controlled by driver.");
+    #endif
+        // Do NOT return — external CS (mux) is allowed.
     }
+
+    // if ((imu_config.io_cs == GPIO_NUM_NC))
+    // {
+    //     // clang-format off
+    //     #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+    //     ESP_LOGE(TAG, "Initialization failed, CS GPIO cannot be unassigned.");
+    //     #endif
+    //     // clang-format on
+
+    //     return ESP_ERR_INVALID_ARG;
+    // }
 
     if ((imu_config.io_miso == GPIO_NUM_NC))
     {
@@ -256,33 +299,159 @@ esp_err_t BNO08x::init_gpio_outputs()
 {
     esp_err_t ret = ESP_OK;
 
-    // configure output(s) (CS, RST, and WAKE)
-    gpio_config_t outputs_config;
-
-    outputs_config.pin_bit_mask = (imu_config.io_wake != GPIO_NUM_NC)
-                                          ? ((1ULL << imu_config.io_cs) | (1ULL << imu_config.io_rst) | (1ULL << imu_config.io_wake))
-                                          : ((1ULL << imu_config.io_cs) | (1ULL << imu_config.io_rst));
-
+    gpio_config_t outputs_config = {};
     outputs_config.mode = GPIO_MODE_OUTPUT;
     outputs_config.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    outputs_config.pull_up_en = GPIO_PULLUP_DISABLE;
-    outputs_config.intr_type = GPIO_INTR_DISABLE;
+    outputs_config.pull_up_en    = GPIO_PULLUP_DISABLE;
+    outputs_config.intr_type     = GPIO_INTR_DISABLE;
+
+    uint64_t pin_mask = 0;
+
+    // Only configure CS if it is assigned
+    if (imu_config.io_cs != GPIO_NUM_NC) {
+        pin_mask |= (1ULL << imu_config.io_cs);
+    }
+
+    // RST must always be assigned (driver checks this earlier)
+    if (imu_config.io_rst != GPIO_NUM_NC) {
+        pin_mask |= (1ULL << imu_config.io_rst);
+    }
+
+    // Only include WAKE if assigned
+    if (imu_config.io_wake != GPIO_NUM_NC) {
+        pin_mask |= (1ULL << imu_config.io_wake);
+    }
+
+    // If no pins to configure, return OK
+    if (pin_mask == 0) {
+#ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+        ESP_LOGW(TAG, "No output GPIOs to configure (CS/WAKE external or unused).");
+#endif
+        init_status.gpio_outputs = true;
+        return ESP_OK;
+    }
+
+    outputs_config.pin_bit_mask = pin_mask;
 
     ret = gpio_config(&outputs_config);
-    if (ret != ESP_OK)
-    {
-        // clang-format off
-        #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Initialization failed, failed to configure CS, RST, and WAKE (if used) gpio.");
-        #endif
-        // clang-format on
-    }
-    else
-    {
-        init_status.gpio_outputs = true; // set gpio_inputs to initialized such that deconstructor knows to clean them up
+    if (ret != ESP_OK) {
+#ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+        ESP_LOGE(TAG, "Initialization failed: failed to configure CS, RST, and WAKE (if used) GPIO.");
+#endif
+    } else {
+        init_status.gpio_outputs = true;
     }
 
     return ret;
+}
+
+/**
+ * @brief Initializes mux pins if needed (called once across all instances).
+ *
+ * @return ESP_OK if initialization was success.
+ */
+esp_err_t BNO08x::init_mux_pins_if_needed()
+{
+    if (mux_pins_initialized)
+    {
+        return ESP_OK;
+    }
+
+    uint64_t pin_mask = 0;
+
+    if (imu_config.mux_pin_a != GPIO_NUM_NC)
+        pin_mask |= (1ULL << imu_config.mux_pin_a);
+    if (imu_config.mux_pin_b != GPIO_NUM_NC)
+        pin_mask |= (1ULL << imu_config.mux_pin_b);
+    if (imu_config.mux_pin_c != GPIO_NUM_NC)
+        pin_mask |= (1ULL << imu_config.mux_pin_c);
+
+    if (pin_mask == 0)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    gpio_config_t io_conf = {};
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    io_conf.pin_bit_mask = pin_mask;
+
+    esp_err_t ret = gpio_config(&io_conf);
+    if (ret == ESP_OK)
+    {
+        // Default to a safe "no device" channel (001 -> Y1 unused)
+        gpio_set_level(imu_config.mux_pin_a, 1);
+        gpio_set_level(imu_config.mux_pin_b, 0);
+        gpio_set_level(imu_config.mux_pin_c, 0);
+        ets_delay_us(10);
+
+        mux_pins_initialized = true;
+    }
+
+    return ret;
+}
+
+/**
+ * @brief Selects this device by acquiring mutex, setting mux channel, and asserting CS.
+ *
+ * @return void, nothing to return
+ */
+void BNO08x::select_device()
+{
+    // Serialize access to SPI + mux across all BNO08x instances
+    if (spi_bus_mutex)
+    {
+        xSemaphoreTake(spi_bus_mutex, portMAX_DELAY);
+    }
+
+    // Select mux channel if used
+    if (use_mux())
+    {
+        uint8_t ch = imu_config.mux_channel & 0x07U;
+
+        gpio_set_level(imu_config.mux_pin_a, (ch & 0x01U) ? 1 : 0);
+        gpio_set_level(imu_config.mux_pin_b, (ch & 0x02U) ? 1 : 0);
+        gpio_set_level(imu_config.mux_pin_c, (ch & 0x04U) ? 1 : 0);
+
+        ets_delay_us(10); // allow mux to settle
+    }
+
+    // Assert CS if we have a direct CS pin
+    if (imu_config.io_cs != GPIO_NUM_NC)
+    {
+        gpio_set_level(imu_config.io_cs, 0);
+    }
+}
+
+/**
+ * @brief Deselects this device by releasing CS, resetting mux, and releasing mutex.
+ *
+ * @return void, nothing to return
+ */
+void BNO08x::deselect_device()
+{
+    // Deassert CS if we have a direct CS pin
+    if (imu_config.io_cs != GPIO_NUM_NC)
+    {
+        gpio_set_level(imu_config.io_cs, 1);
+    }
+
+    // Optionally put mux into "no device selected" (Y1) state
+    if (use_mux())
+    {
+        uint8_t ch = 1U; // 001 -> Y1 (unused - safe deselect state)
+        gpio_set_level(imu_config.mux_pin_a, (ch & 0x01U) ? 1 : 0);
+        gpio_set_level(imu_config.mux_pin_b, (ch & 0x02U) ? 1 : 0);
+        gpio_set_level(imu_config.mux_pin_c, (ch & 0x04U) ? 1 : 0);
+        ets_delay_us(10);
+    }
+
+    if (spi_bus_mutex)
+    {
+        xSemaphoreGive(spi_bus_mutex);
+    }
 }
 
 /**
@@ -304,7 +473,11 @@ esp_err_t BNO08x::init_gpio()
     if (ret != ESP_OK)
         return ret;
 
-    gpio_set_level(imu_config.io_cs, 1);
+    // Only drive CS if the driver owns it
+    if (imu_config.io_cs != GPIO_NUM_NC) {
+        gpio_set_level(imu_config.io_cs, 1);
+    }
+
     gpio_set_level(imu_config.io_rst, 1);
 
     if (imu_config.io_wake != GPIO_NUM_NC)
@@ -375,7 +548,7 @@ esp_err_t BNO08x::init_spi()
     uint8_t tx_buffer[50] = {0}; // for dummy transaction to stabilize SPI peripheral
 
     // initialize the spi peripheral
-    // ret = spi_bus_initialize(imu_config.spi_peripheral, &bus_config, SPI_DMA_CH_AUTO);
+    // ret = spi_bus_initialize(imu_config.spi_host, &bus_config, SPI_DMA_CH_AUTO);
     // if (ret != ESP_OK)
     // {
     //     // clang-format off
@@ -392,7 +565,7 @@ esp_err_t BNO08x::init_spi()
     // }
 
     // add the imu device to the bus
-    ret = spi_bus_add_device(imu_config.spi_peripheral, &imu_spi_config, &spi_hdl);
+    ret = spi_bus_add_device(imu_config.spi_host, &imu_spi_config, &spi_hdl);
     if (ret != ESP_OK)
     {
         // clang-format off
@@ -481,37 +654,32 @@ esp_err_t BNO08x::deinit_gpio_outputs()
         ret = gpio_reset_pin(imu_config.io_wake);
         if (ret != ESP_OK)
         {
-            // clang-format off
-            #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+#ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
             ESP_LOGE(TAG, "Deconstruction failed, could reset gpio WAKE pin to default state.");
-            #endif
-            // clang-format on
-
+#endif
             return ret;
         }
     }
 
-    ret = gpio_reset_pin(imu_config.io_cs);
-    if (ret != ESP_OK)
+    // Only reset CS if the driver was actually using it
+    if (imu_config.io_cs != GPIO_NUM_NC)
     {
-        // clang-format off
-        #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Deconstruction failed, could reset gpio CS pin to default state.");
-        #endif
-        // clang-format on
-
-        return ret;
+        ret = gpio_reset_pin(imu_config.io_cs);
+        if (ret != ESP_OK)
+        {
+#ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+            ESP_LOGE(TAG, "Deconstruction failed, could reset gpio CS pin to default state.");
+#endif
+            return ret;
+        }
     }
 
     ret = gpio_reset_pin(imu_config.io_rst);
     if (ret != ESP_OK)
     {
-        // clang-format off
-        #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+#ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
         ESP_LOGE(TAG, "Deconstruction failed, could reset gpio RST pin to default state.");
-        #endif
-        // clang-format on
-
+#endif
         return ret;
     }
 
@@ -580,7 +748,7 @@ esp_err_t BNO08x::deinit_spi()
 
     if (init_status.spi_bus)
     {
-        ret = spi_bus_free(imu_config.spi_peripheral);
+        ret = spi_bus_free(imu_config.spi_host);
         if (ret != ESP_OK)
         {
             // clang-format off
@@ -741,7 +909,10 @@ bool BNO08x::hard_reset()
     // resetting disables all reports
     xEventGroupClearBits(evt_grp_report_en, EVT_GRP_RPT_ALL_BITS);
 
-    gpio_set_level(imu_config.io_cs, 1);
+    // Only drive CS if owned by driver
+    if (imu_config.io_cs != GPIO_NUM_NC) {
+        gpio_set_level(imu_config.io_cs, 1);
+    }
 
     if (imu_config.io_wake != GPIO_NUM_NC)
         gpio_set_level(imu_config.io_wake, 1);
@@ -908,16 +1079,23 @@ esp_err_t BNO08x::receive_packet()
     bno08x_rx_packet_t packet;
     esp_err_t ret = ESP_OK;
 
-    if (gpio_get_level(imu_config.io_int)) // ensure INT pin is low
+    // INT must be low to indicate data is ready
+    if (gpio_get_level(imu_config.io_int))
+    {
         return ESP_ERR_INVALID_STATE;
+    }
 
-    gpio_set_level(imu_config.io_cs, 0); // assert chip select
+    // Acquire bus + select mux/CS
+    select_device();
 
-    // receive packet header
+    // Receive packet header (4 bytes)
     ret = receive_packet_header(&packet);
     if (ret != ESP_OK)
     {
-        gpio_set_level(imu_config.io_cs, 1); // de-assert chip select
+#ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+        ESP_LOGE(TAG, "Failed to receive packet header (err=0x%x)", ret);
+#endif
+        deselect_device();
         return ret;
     }
 
@@ -927,20 +1105,26 @@ esp_err_t BNO08x::receive_packet()
     #endif
     // clang-format on
 
-    if (packet.length == 0)
+    // If there is a body, receive it
+    if (packet.length > 0)
     {
-        gpio_set_level(imu_config.io_cs, 1); // de-assert chip select
-        return ESP_ERR_INVALID_RESPONSE;
+        ret = receive_packet_body(&packet);
+        if (ret != ESP_OK)
+        {
+#ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+            ESP_LOGE(TAG, "Failed to receive packet body (err=0x%x)", ret);
+#endif
+            deselect_device();
+            return ret;
+        }
     }
 
-    ret = receive_packet_body(&packet);
-    if (ret == ESP_OK)
-    {
-        xQueueSend(queue_rx_data, &packet, 0); // send received data to data_proc_task
-        xEventGroupSetBits(evt_grp_spi, EVT_GRP_SPI_RX_DONE_BIT);
-    }
+    // Done with SPI + mux
+    deselect_device();
 
-    gpio_set_level(imu_config.io_cs, 1); // de-assert chip select
+    // Send received data to data_proc_task
+    xQueueSend(queue_rx_data, &packet, 0);
+    xEventGroupSetBits(evt_grp_spi, EVT_GRP_SPI_RX_DONE_BIT);
 
     return ret;
 }
@@ -1134,18 +1318,40 @@ void BNO08x::queue_packet(uint8_t channel_number, uint8_t data_length, uint8_t* 
  */
 void BNO08x::send_packet(bno08x_tx_packet_t* packet)
 {
-    // setup transaction to send packet
-    spi_transaction.length = packet->length * 8;
-    spi_transaction.rxlength = 0;
+    if (packet == nullptr)
+    {
+        return;
+    }
+
+    if (packet->length == 0)
+    {
+        return;
+    }
+
+    // Setup transaction buffer pointers
     spi_transaction.tx_buffer = packet->body;
     spi_transaction.rx_buffer = NULL;
+    spi_transaction.length = packet->length * 8;
+    spi_transaction.rxlength = 0;
     spi_transaction.flags = 0;
 
-    gpio_set_level(imu_config.io_cs, 0);                    // assert chip select
-    spi_device_polling_transmit(spi_hdl, &spi_transaction); // send data packet
+    // Acquire bus + select mux/CS
+    select_device();
 
-    gpio_set_level(imu_config.io_cs, 1); // de-assert chip select
+    esp_err_t ret = spi_device_polling_transmit(spi_hdl, &spi_transaction);
 
+    // Release mux/CS + mutex
+    deselect_device();
+
+    if (ret != ESP_OK)
+    {
+#ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+        ESP_LOGE(TAG, "spi_device_polling_transmit failed (err=0x%x)", ret);
+#endif
+        return;
+    }
+
+    // Indicate transmit complete
     xEventGroupSetBits(evt_grp_spi, EVT_GRP_SPI_TX_DONE_BIT);
 }
 
