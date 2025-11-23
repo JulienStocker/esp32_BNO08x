@@ -385,7 +385,7 @@ esp_err_t BNO08x::init_mux_pins_if_needed()
         gpio_set_level(imu_config.mux_pin_a, 1);
         gpio_set_level(imu_config.mux_pin_b, 0);
         gpio_set_level(imu_config.mux_pin_c, 0);
-        ets_delay_us(10);
+        ets_delay_us(100); // good for three
 
         mux_pins_initialized = true;
     }
@@ -415,7 +415,7 @@ void BNO08x::select_device()
         gpio_set_level(imu_config.mux_pin_b, (ch & 0x02U) ? 1 : 0);
         gpio_set_level(imu_config.mux_pin_c, (ch & 0x04U) ? 1 : 0);
 
-        ets_delay_us(10); // allow mux to settle
+        ets_delay_us(200); // allow mux to settle - working for 3 IMUs
     }
 
     // Assert CS if we have a direct CS pin
@@ -445,7 +445,7 @@ void BNO08x::deselect_device()
         gpio_set_level(imu_config.mux_pin_a, (ch & 0x01U) ? 1 : 0);
         gpio_set_level(imu_config.mux_pin_b, (ch & 0x02U) ? 1 : 0);
         gpio_set_level(imu_config.mux_pin_c, (ch & 0x04U) ? 1 : 0);
-        ets_delay_us(10);
+        ets_delay_us(200); // working for 3 IMU stability
     }
 
     if (spi_bus_mutex)
