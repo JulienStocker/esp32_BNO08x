@@ -123,11 +123,12 @@ bool BNO08x::initialize()
  */
 esp_err_t BNO08x::init_config_args()
 {
-    if ((imu_config.io_cs == GPIO_NUM_NC))
+    // Allow CS to be unassigned if custom callbacks are provided
+    if ((imu_config.io_cs == GPIO_NUM_NC) && (!imu_config.cs_assert_cb || !imu_config.cs_deassert_cb))
     {
         // clang-format off
         #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Initialization failed, CS GPIO cannot be unassigned.");
+        ESP_LOGE(TAG, "Initialization failed, CS GPIO cannot be unassigned without callbacks.");
         #endif
         // clang-format on
 
@@ -167,11 +168,12 @@ esp_err_t BNO08x::init_config_args()
         return ESP_ERR_INVALID_ARG;
     }
 
-    if ((imu_config.io_rst == GPIO_NUM_NC))
+    // Allow RST to be unassigned if custom callbacks are provided
+    if ((imu_config.io_rst == GPIO_NUM_NC) && (!imu_config.rst_assert_cb || !imu_config.rst_deassert_cb))
     {
         // clang-format off
         #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "RST GPIO cannot be unassigned.");
+        ESP_LOGE(TAG, "RST GPIO cannot be unassigned without callbacks.");
         #endif
         // clang-format on
 
@@ -248,6 +250,54 @@ esp_err_t BNO08x::init_gpio_inputs()
 }
 
 /**
+ * @brief Set CS pin level (supports both native GPIO and custom callbacks)
+ *
+ * @param level 0 to assert CS (low), 1 to deassert CS (high)
+ */
+void BNO08x::set_cs(uint8_t level)
+{
+    if (level == 0) {
+        // Assert CS (active low)
+        if (imu_config.cs_assert_cb) {
+            imu_config.cs_assert_cb(imu_config.cs_user_data);
+        } else if (imu_config.io_cs != GPIO_NUM_NC) {
+            gpio_set_level(imu_config.io_cs, 0);
+        }
+    } else {
+        // Deassert CS (inactive high)
+        if (imu_config.cs_deassert_cb) {
+            imu_config.cs_deassert_cb(imu_config.cs_user_data);
+        } else if (imu_config.io_cs != GPIO_NUM_NC) {
+            gpio_set_level(imu_config.io_cs, 1);
+        }
+    }
+}
+
+/**
+ * @brief Set RST pin level (supports both native GPIO and custom callbacks)
+ *
+ * @param level 0 to assert RST (low/reset), 1 to deassert RST (high/normal operation)
+ */
+void BNO08x::set_rst(uint8_t level)
+{
+    if (level == 0) {
+        // Assert RST (active low - in reset)
+        if (imu_config.rst_assert_cb) {
+            imu_config.rst_assert_cb(imu_config.rst_user_data);
+        } else if (imu_config.io_rst != GPIO_NUM_NC) {
+            gpio_set_level(imu_config.io_rst, 0);
+        }
+    } else {
+        // Deassert RST (inactive high - normal operation)
+        if (imu_config.rst_deassert_cb) {
+            imu_config.rst_deassert_cb(imu_config.rst_user_data);
+        } else if (imu_config.io_rst != GPIO_NUM_NC) {
+            set_rst(1);
+        }
+    }
+}
+
+/**
  * @brief Initializes required gpio outputs.
  *
  * @return ESP_OK if initialization was success.
@@ -257,29 +307,49 @@ esp_err_t BNO08x::init_gpio_outputs()
     esp_err_t ret = ESP_OK;
 
     // configure output(s) (CS, RST, and WAKE)
+    // Skip CS and/or RST if using custom callbacks
     gpio_config_t outputs_config;
 
-    outputs_config.pin_bit_mask = (imu_config.io_wake != GPIO_NUM_NC)
-                                          ? ((1ULL << imu_config.io_cs) | (1ULL << imu_config.io_rst) | (1ULL << imu_config.io_wake))
-                                          : ((1ULL << imu_config.io_cs) | (1ULL << imu_config.io_rst));
+    // Determine which pins to configure as GPIO
+    bool use_cs_gpio = !(imu_config.cs_assert_cb && imu_config.cs_deassert_cb) && (imu_config.io_cs != GPIO_NUM_NC);
+    bool use_rst_gpio = !(imu_config.rst_assert_cb && imu_config.rst_deassert_cb) && (imu_config.io_rst != GPIO_NUM_NC);
+    bool use_wake_gpio = (imu_config.io_wake != GPIO_NUM_NC);
 
-    outputs_config.mode = GPIO_MODE_OUTPUT;
-    outputs_config.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    outputs_config.pull_up_en = GPIO_PULLUP_DISABLE;
-    outputs_config.intr_type = GPIO_INTR_DISABLE;
-
-    ret = gpio_config(&outputs_config);
-    if (ret != ESP_OK)
-    {
-        // clang-format off
-        #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Initialization failed, failed to configure CS, RST, and WAKE (if used) gpio.");
-        #endif
-        // clang-format on
+    // Build pin bitmask
+    outputs_config.pin_bit_mask = 0;
+    if (use_cs_gpio) {
+        outputs_config.pin_bit_mask |= (1ULL << imu_config.io_cs);
     }
-    else
-    {
-        init_status.gpio_outputs = true; // set gpio_inputs to initialized such that deconstructor knows to clean them up
+    if (use_rst_gpio) {
+        outputs_config.pin_bit_mask |= (1ULL << imu_config.io_rst);
+    }
+    if (use_wake_gpio) {
+        outputs_config.pin_bit_mask |= (1ULL << imu_config.io_wake);
+    }
+
+    // Only configure GPIO if there are pins to configure
+    if (outputs_config.pin_bit_mask != 0) {
+        outputs_config.mode = GPIO_MODE_OUTPUT;
+        outputs_config.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        outputs_config.pull_up_en = GPIO_PULLUP_DISABLE;
+        outputs_config.intr_type = GPIO_INTR_DISABLE;
+
+        ret = gpio_config(&outputs_config);
+        if (ret != ESP_OK)
+        {
+            // clang-format off
+            #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+            ESP_LOGE(TAG, "Initialization failed, failed to configure CS, RST, and WAKE (if used) gpio.");
+            #endif
+            // clang-format on
+        }
+        else
+        {
+            init_status.gpio_outputs = true; // set gpio_inputs to initialized such that deconstructor knows to clean them up
+        }
+    } else {
+        // All outputs are controlled via callbacks, no GPIO config needed
+        init_status.gpio_outputs = true;
     }
 
     return ret;
@@ -304,8 +374,8 @@ esp_err_t BNO08x::init_gpio()
     if (ret != ESP_OK)
         return ret;
 
-    gpio_set_level(imu_config.io_cs, 1);
-    gpio_set_level(imu_config.io_rst, 1);
+    set_cs(1);  // CS high (inactive)
+    set_rst(1);
 
     if (imu_config.io_wake != GPIO_NUM_NC)
         gpio_set_level(imu_config.io_wake, 1);
@@ -741,14 +811,16 @@ bool BNO08x::hard_reset()
     // resetting disables all reports
     xEventGroupClearBits(evt_grp_report_en, EVT_GRP_RPT_ALL_BITS);
 
-    gpio_set_level(imu_config.io_cs, 1);
+    set_cs(1);  // CS high (inactive)
 
     if (imu_config.io_wake != GPIO_NUM_NC)
         gpio_set_level(imu_config.io_wake, 1);
 
-    gpio_set_level(imu_config.io_rst, 0); // set reset pin low
+    set_rst(0); // set reset pin low
+    vTaskDelay(pdMS_TO_TICKS(1));  // 1ms for I2C to complete (should only need ~2ms max)
     vTaskDelay(HARD_RESET_DELAY_MS);      // 10ns min, set to larger delay to let things stabilize(Anton)
-    gpio_set_level(imu_config.io_rst, 1); // bring out of reset
+    set_rst(1); // bring out of reset
+    vTaskDelay(pdMS_TO_TICKS(1));  // 1ms for I2C to complete
 
     // Receive advertisement message on boot (see SH2 Ref. Manual 5.2 & 5.3)
     if (!wait_for_rx_done()) // wait for receive operation to complete
@@ -911,13 +983,13 @@ esp_err_t BNO08x::receive_packet()
     if (gpio_get_level(imu_config.io_int)) // ensure INT pin is low
         return ESP_ERR_INVALID_STATE;
 
-    gpio_set_level(imu_config.io_cs, 0); // assert chip select
+    set_cs(0); // assert chip select
 
     // receive packet header
     ret = receive_packet_header(&packet);
     if (ret != ESP_OK)
     {
-        gpio_set_level(imu_config.io_cs, 1); // de-assert chip select
+        set_cs(1); // de-assert chip select
         return ret;
     }
 
@@ -929,7 +1001,7 @@ esp_err_t BNO08x::receive_packet()
 
     if (packet.length == 0)
     {
-        gpio_set_level(imu_config.io_cs, 1); // de-assert chip select
+        set_cs(1); // de-assert chip select
         return ESP_ERR_INVALID_RESPONSE;
     }
 
@@ -940,7 +1012,7 @@ esp_err_t BNO08x::receive_packet()
         xEventGroupSetBits(evt_grp_spi, EVT_GRP_SPI_RX_DONE_BIT);
     }
 
-    gpio_set_level(imu_config.io_cs, 1); // de-assert chip select
+    set_cs(1); // de-assert chip select
 
     return ret;
 }
@@ -1141,10 +1213,10 @@ void BNO08x::send_packet(bno08x_tx_packet_t* packet)
     spi_transaction.rx_buffer = NULL;
     spi_transaction.flags = 0;
 
-    gpio_set_level(imu_config.io_cs, 0);                    // assert chip select
+    set_cs(0);                    // assert chip select
     spi_device_polling_transmit(spi_hdl, &spi_transaction); // send data packet
 
-    gpio_set_level(imu_config.io_cs, 1); // de-assert chip select
+    set_cs(1); // de-assert chip select
 
     xEventGroupSetBits(evt_grp_spi, EVT_GRP_SPI_TX_DONE_BIT);
 }
