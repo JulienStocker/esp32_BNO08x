@@ -570,7 +570,9 @@ class BNO08x
             return imu_config.use_mux &&
                    imu_config.mux_pin_a != GPIO_NUM_NC &&
                    imu_config.mux_pin_b != GPIO_NUM_NC &&
-                   imu_config.mux_pin_c != GPIO_NUM_NC;
+                   imu_config.mux_pin_c != GPIO_NUM_NC &&
+                   imu_config.mux_pin_d != GPIO_NUM_NC &&
+                   imu_config.cs_mux_pin != GPIO_NUM_NC;
         }
         void select_device();   ///< Acquire mutex, select mux channel, pull CS low (if any)
         void deselect_device(); ///< Release CS / mux and give back mutex

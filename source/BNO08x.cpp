@@ -347,6 +347,7 @@ esp_err_t BNO08x::init_gpio_outputs()
 
 /**
  * @brief Initializes mux pins if needed (called once across all instances).
+ *        For 74HC154: 4 address pins (A,B,C,D) + CS_MUX enable pin.
  *
  * @return ESP_OK if initialization was success.
  */
@@ -359,12 +360,19 @@ esp_err_t BNO08x::init_mux_pins_if_needed()
 
     uint64_t pin_mask = 0;
 
+    // Configure 4 address lines (A, B, C, D) for 74HC154
     if (imu_config.mux_pin_a != GPIO_NUM_NC)
         pin_mask |= (1ULL << imu_config.mux_pin_a);
     if (imu_config.mux_pin_b != GPIO_NUM_NC)
         pin_mask |= (1ULL << imu_config.mux_pin_b);
     if (imu_config.mux_pin_c != GPIO_NUM_NC)
         pin_mask |= (1ULL << imu_config.mux_pin_c);
+    if (imu_config.mux_pin_d != GPIO_NUM_NC)
+        pin_mask |= (1ULL << imu_config.mux_pin_d);
+    
+    // Configure CS_MUX pin (connected to /G1 and /G2)
+    if (imu_config.cs_mux_pin != GPIO_NUM_NC)
+        pin_mask |= (1ULL << imu_config.cs_mux_pin);
 
     if (pin_mask == 0)
     {
@@ -381,11 +389,13 @@ esp_err_t BNO08x::init_mux_pins_if_needed()
     esp_err_t ret = gpio_config(&io_conf);
     if (ret == ESP_OK)
     {
-        // Default to a safe "no device" channel (001 -> Y1 unused)
-        gpio_set_level(imu_config.mux_pin_a, 1);
-        gpio_set_level(imu_config.mux_pin_b, 0);
-        gpio_set_level(imu_config.mux_pin_c, 0);
-        ets_delay_us(100); // good for three
+        // Default: CS_MUX HIGH (decoder disabled), address = 0x1 (Y1 unused)
+        gpio_set_level(imu_config.cs_mux_pin, 1);  // Disable decoder
+        gpio_set_level(imu_config.mux_pin_a, 1);   // A = 1
+        gpio_set_level(imu_config.mux_pin_b, 0);   // B = 0
+        gpio_set_level(imu_config.mux_pin_c, 0);   // C = 0
+        gpio_set_level(imu_config.mux_pin_d, 0);   // D = 0 -> 0001 = Y1 (unused)
+        ets_delay_us(100);
 
         mux_pins_initialized = true;
     }
@@ -395,6 +405,7 @@ esp_err_t BNO08x::init_mux_pins_if_needed()
 
 /**
  * @brief Selects this device by acquiring mutex, setting mux channel, and asserting CS.
+ *        For 74HC154: sets 4-bit address (A,B,C,D) and pulls CS_MUX LOW to enable decoder.
  *
  * @return void, nothing to return
  */
@@ -406,19 +417,26 @@ void BNO08x::select_device()
         xSemaphoreTake(spi_bus_mutex, portMAX_DELAY);
     }
 
-    // Select mux channel if used
+    // Select mux channel if used (74HC154: 4-bit addressing)
     if (use_mux())
     {
-        uint8_t ch = imu_config.mux_channel & 0x07U;
+        uint8_t ch = imu_config.mux_channel & 0x0FU;  // 4-bit mask (0-15)
 
-        gpio_set_level(imu_config.mux_pin_a, (ch & 0x01U) ? 1 : 0);
-        gpio_set_level(imu_config.mux_pin_b, (ch & 0x02U) ? 1 : 0);
-        gpio_set_level(imu_config.mux_pin_c, (ch & 0x04U) ? 1 : 0);
+        // Set 4-bit address (A, B, C, D)
+        gpio_set_level(imu_config.mux_pin_a, (ch & 0x01U) ? 1 : 0);  // Bit 0 (LSB)
+        gpio_set_level(imu_config.mux_pin_b, (ch & 0x02U) ? 1 : 0);  // Bit 1
+        gpio_set_level(imu_config.mux_pin_c, (ch & 0x04U) ? 1 : 0);  // Bit 2
+        gpio_set_level(imu_config.mux_pin_d, (ch & 0x08U) ? 1 : 0);  // Bit 3 (MSB)
 
-        ets_delay_us(200); // allow mux to settle - working for 3 IMUs
+        ets_delay_us(10);  // Allow address lines to settle
+
+        // Pull CS_MUX LOW to enable the 74HC154 decoder (/G1 = /G2 = LOW)
+        gpio_set_level(imu_config.cs_mux_pin, 0);
+
+        ets_delay_us(10);  // Allow decoder to activate and output to settle
     }
 
-    // Assert CS if we have a direct CS pin
+    // Assert CS if we have a direct CS pin (for non-muxed IMUs)
     if (imu_config.io_cs != GPIO_NUM_NC)
     {
         gpio_set_level(imu_config.io_cs, 0);
@@ -426,7 +444,8 @@ void BNO08x::select_device()
 }
 
 /**
- * @brief Deselects this device by releasing CS, resetting mux, and releasing mutex.
+ * @brief Deselects this device by releasing CS, disabling mux, and releasing mutex.
+ *        For 74HC154: pulls CS_MUX HIGH to disable decoder (all Y outputs go HIGH).
  *
  * @return void, nothing to return
  */
@@ -438,13 +457,18 @@ void BNO08x::deselect_device()
         gpio_set_level(imu_config.io_cs, 1);
     }
 
-    // Optionally put mux into "no device selected" (Y1) state
+    // Disable 74HC154 decoder by pulling CS_MUX HIGH (/G1 = /G2 = HIGH)
     if (use_mux())
     {
-        uint8_t ch = 1U; // 001 -> Y1 (unused - safe deselect state)
+        gpio_set_level(imu_config.cs_mux_pin, 1);  // Disable decoder
+        ets_delay_us(10);  // Allow outputs to settle
+        
+        // Optionally set address to safe state (Y1 = 0x1)
+        uint8_t ch = 1U; // 0001 -> Y1 (unused - safe deselect state)
         gpio_set_level(imu_config.mux_pin_a, (ch & 0x01U) ? 1 : 0);
         gpio_set_level(imu_config.mux_pin_b, (ch & 0x02U) ? 1 : 0);
         gpio_set_level(imu_config.mux_pin_c, (ch & 0x04U) ? 1 : 0);
+        gpio_set_level(imu_config.mux_pin_d, (ch & 0x08U) ? 1 : 0);
         ets_delay_us(200); // working for 3 IMU stability
     }
 

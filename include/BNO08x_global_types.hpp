@@ -84,13 +84,15 @@ typedef struct bno08x_config_t
         bool install_isr_service;         ///<Indicates whether the ISR service for the HINT should be installed at IMU initialization
 
         // ─────────────────────────────────────────────
-        // NEW: Mux-aware CS support
+        // NEW: Mux-aware CS support (74HC154 4-to-16 decoder)
         // ─────────────────────────────────────────────
-        bool use_mux;          ///< true if external SN74HC138 controls CS
-        gpio_num_t mux_pin_a;  ///< SN74HC138 A input
-        gpio_num_t mux_pin_b;  ///< SN74HC138 B input
-        gpio_num_t mux_pin_c;  ///< SN74HC138 C input
-        uint8_t mux_channel;   ///< 0–7: Y0–Y7 output that goes to this IMU CS
+        bool use_mux;          ///< true if external 74HC154 controls CS
+        gpio_num_t mux_pin_a;  ///< 74HC154 A input (LSB)
+        gpio_num_t mux_pin_b;  ///< 74HC154 B input
+        gpio_num_t mux_pin_c;  ///< 74HC154 C input
+        gpio_num_t mux_pin_d;  ///< 74HC154 D input (MSB)
+        gpio_num_t cs_mux_pin; ///< CS_MUX pin connected to /G1 and /G2 (active-low enable)
+        uint8_t mux_channel;   ///< 0–15: Y0–Y15 output that goes to this IMU CS
 
         /// @brief IMU configuration settings constructor
         bno08x_config_t(
@@ -108,6 +110,8 @@ typedef struct bno08x_config_t
                 gpio_num_t mux_a_ = GPIO_NUM_NC,
                 gpio_num_t mux_b_ = GPIO_NUM_NC,
                 gpio_num_t mux_c_ = GPIO_NUM_NC,
+                gpio_num_t mux_d_ = GPIO_NUM_NC,
+                gpio_num_t cs_mux_ = GPIO_NUM_NC,
                 uint8_t mux_ch_   = 0)
             : spi_host(host)
             , io_mosi(mosi)
@@ -123,6 +127,8 @@ typedef struct bno08x_config_t
             , mux_pin_a(mux_a_)
             , mux_pin_b(mux_b_)
             , mux_pin_c(mux_c_)
+            , mux_pin_d(mux_d_)
+            , cs_mux_pin(cs_mux_)
             , mux_channel(mux_ch_)
         {
         }
