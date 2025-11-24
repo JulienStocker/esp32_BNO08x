@@ -4,6 +4,7 @@
  */
 #pragma once
 // standard library includes
+#include <cstdint>
 #include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
@@ -125,7 +126,13 @@ class BNO08x
         float get_pitch_deg();
         float get_yaw_deg();
 
+        // Optimized: Get all three Euler angles in one call (reduces redundant quaternion fetching and normalization)
+        void get_euler_angles(float& roll, float& pitch, float& yaw);
+
         void get_quat(float& i, float& j, float& k, float& real, float& rad_accuracy, BNO08xAccuracy& accuracy);
+        void get_quat(float& i, float& j, float& k, float& real);
+        void get_quat_raw(uint16_t& i, uint16_t& j, uint16_t& k, uint16_t& real);
+
         float get_quat_I();
         float get_quat_J();
         float get_quat_K();

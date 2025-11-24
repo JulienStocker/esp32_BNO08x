@@ -1,5 +1,6 @@
 #include "BNO08x.hpp"
 #include "BNO08x_macros.hpp"
+#include <cstdint>
 
 /**
  * @brief BNO08x imu constructor.
@@ -698,7 +699,7 @@ bool BNO08x::wait_for_rx_done()
     {
         // clang-format off
         #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Interrupt to host device never asserted.");
+        ESP_LOGE(TAG, "Interrupt to host device never asserted. (INT pin: GPIO%d)", imu_config.io_int);
         #endif
         // clang-format on
 
@@ -755,7 +756,7 @@ bool BNO08x::wait_for_data()
     {
         // clang-format off
         #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Interrupt to host device never asserted.");
+        ESP_LOGE(TAG, "Interrupt to host device never asserted. (INT pin: GPIO%d)", imu_config.io_int);
         #endif
         // clang-format on
     }
@@ -2727,9 +2728,12 @@ void BNO08x::clear_tare()
  */
 float BNO08x::q_to_float(int16_t fixed_point_value, uint8_t q_point)
 {
-    float q_float = fixed_point_value;
-    q_float *= pow(2, q_point * -1);
-    return (q_float);
+    //old approach
+    // float q_float = fixed_point_value;
+    // q_float *= pow(2, q_point * -1);
+    // return (q_float);
+    //faster approach? according chat gpt.2312
+    return fixed_point_value / float(1 << q_point);
 }
 
 /**
@@ -3045,6 +3049,55 @@ float BNO08x::get_yaw_deg()
 }
 
 /**
+ * @brief Get all three Euler angles (roll, pitch, yaw) in degrees in a single optimized call.
+ *
+ * This function is significantly more efficient than calling get_roll_deg(), get_pitch_deg(),
+ * and get_yaw_deg() separately, as it:
+ * - Fetches quaternion components only once (instead of 12 times)
+ * - Performs normalization only once (instead of 3 times)
+ * - Reuses intermediate calculations where possible
+ *
+ * @param roll Reference to store rotation about x-axis in degrees
+ * @param pitch Reference to store rotation about y-axis in degrees
+ * @param yaw Reference to store rotation about z-axis in degrees
+ */
+void BNO08x::get_euler_angles(float& roll, float& pitch, float& yaw)
+{
+    // Fetch quaternion components ONCE
+    float dq_w = get_quat_real();
+    float dq_x = get_quat_I();
+    float dq_y = get_quat_J();
+    float dq_z = get_quat_K();
+
+    // Normalize ONCE
+    float norm = sqrt(dq_w * dq_w + dq_x * dq_x + dq_y * dq_y + dq_z * dq_z);
+    dq_w /= norm;
+    dq_x /= norm;
+    dq_y /= norm;
+    dq_z /= norm;
+
+    // Pre-calculate commonly used terms
+    float dq_x_sq = dq_x * dq_x;
+    float dq_y_sq = dq_y * dq_y;
+    float dq_z_sq = dq_z * dq_z;
+
+    // Roll (x-axis rotation)
+    float t_0 = 2.0 * (dq_w * dq_x + dq_y * dq_z);
+    float t_1 = 1.0 - 2.0 * (dq_x_sq + dq_y_sq);
+    roll = atan2(t_0, t_1) * (180.0 / M_PI);
+
+    // Pitch (y-axis rotation)
+    float t_2 = 2.0 * (dq_w * dq_y - dq_z * dq_x);
+    t_2 = (t_2 > 1.0) ? 1.0 : ((t_2 < -1.0) ? -1.0 : t_2);
+    pitch = asin(t_2) * (180.0 / M_PI);
+
+    // Yaw (z-axis rotation)
+    float t_3 = 2.0 * (dq_w * dq_z + dq_x * dq_y);
+    float t_4 = 1.0 - 2.0 * (dq_y_sq + dq_z_sq);
+    yaw = atan2(t_3, t_4) * (180.0 / M_PI);
+}
+
+/**
  * @brief Get the full quaternion reading.
  *
  * @param i Reference variable to save reported i component of quaternion.
@@ -3066,6 +3119,20 @@ void BNO08x::get_quat(float& i, float& j, float& k, float& real, float& rad_accu
     accuracy = static_cast<BNO08xAccuracy>(quat_accuracy);
 }
 
+void BNO08x::get_quat(float& i, float& j, float& k, float& real)
+{
+    i = q_to_float(raw_quat_I, ROTATION_VECTOR_Q1);
+    j = q_to_float(raw_quat_J, ROTATION_VECTOR_Q1);
+    k = q_to_float(raw_quat_K, ROTATION_VECTOR_Q1);
+    real = q_to_float(raw_quat_real, ROTATION_VECTOR_Q1);
+}
+void BNO08x::get_quat_raw(uint16_t& i, uint16_t& j, uint16_t& k, uint16_t& real)
+{
+    i = raw_quat_I;
+    j = raw_quat_J;
+    k = raw_quat_K;
+    real = raw_quat_real;
+}
 /**
  * @brief Get I component of reported quaternion.
  *
