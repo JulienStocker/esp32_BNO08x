@@ -400,11 +400,12 @@ void BNO08x::handle_cb(uint8_t rpt_ID, BNO08xCbGeneric* cb_entry)
  */
 esp_err_t BNO08x::init_config_args()
 {
-    if ((imu_config.io_cs == GPIO_NUM_NC))
+    // Allow CS to be unassigned if custom callbacks are provided
+    if ((imu_config.io_cs == GPIO_NUM_NC) && (!imu_config.cs_assert_cb || !imu_config.cs_deassert_cb))
     {
         // clang-format off
         #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Initialization failed, CS GPIO cannot be unassigned.");
+        ESP_LOGE(TAG, "Initialization failed, CS GPIO cannot be unassigned without callbacks.");
         #endif
         // clang-format on
 
@@ -444,11 +445,12 @@ esp_err_t BNO08x::init_config_args()
         return ESP_ERR_INVALID_ARG;
     }
 
-    if ((imu_config.io_rst == GPIO_NUM_NC))
+    // Allow RST to be unassigned if custom callbacks are provided
+    if ((imu_config.io_rst == GPIO_NUM_NC) && (!imu_config.rst_assert_cb || !imu_config.rst_deassert_cb))
     {
         // clang-format off
         #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "RST GPIO cannot be unassigned.");
+        ESP_LOGE(TAG, "RST GPIO cannot be unassigned without callbacks.");
         #endif
         // clang-format on
 
@@ -501,7 +503,7 @@ esp_err_t BNO08x::init_gpio_inputs()
     gpio_config_t inputs_config;
     inputs_config.pin_bit_mask = (1ULL << imu_config.io_int);
     inputs_config.mode = GPIO_MODE_INPUT;
-    inputs_config.pull_up_en = GPIO_PULLUP_DISABLE;
+    inputs_config.pull_up_en = GPIO_PULLUP_ENABLE;
     inputs_config.pull_down_en = GPIO_PULLDOWN_DISABLE;
     inputs_config.intr_type = GPIO_INTR_NEGEDGE;
 
@@ -525,6 +527,54 @@ esp_err_t BNO08x::init_gpio_inputs()
 }
 
 /**
+ * @brief Set CS pin level (supports both native GPIO and custom callbacks)
+ *
+ * @param level 0 to assert CS (low), 1 to deassert CS (high)
+ */
+void BNO08x::set_cs(uint8_t level)
+{
+    if (level == 0) {
+        // Assert CS (active low)
+        if (imu_config.cs_assert_cb) {
+            imu_config.cs_assert_cb(imu_config.cs_user_data);
+        } else if (imu_config.io_cs != GPIO_NUM_NC) {
+            gpio_set_level(imu_config.io_cs, 0);
+        }
+    } else {
+        // Deassert CS (inactive high)
+        if (imu_config.cs_deassert_cb) {
+            imu_config.cs_deassert_cb(imu_config.cs_user_data);
+        } else if (imu_config.io_cs != GPIO_NUM_NC) {
+            gpio_set_level(imu_config.io_cs, 1);
+        }
+    }
+}
+
+/**
+ * @brief Set RST pin level (supports both native GPIO and custom callbacks)
+ *
+ * @param level 0 to assert RST (low/reset), 1 to deassert RST (high/normal operation)
+ */
+void BNO08x::set_rst(uint8_t level)
+{
+    if (level == 0) {
+        // Assert RST (active low - in reset)
+        if (imu_config.rst_assert_cb) {
+            imu_config.rst_assert_cb(imu_config.rst_user_data);
+        } else if (imu_config.io_rst != GPIO_NUM_NC) {
+            gpio_set_level(imu_config.io_rst, 0);
+        }
+    } else {
+        // Deassert RST (inactive high - normal operation)
+        if (imu_config.rst_deassert_cb) {
+            imu_config.rst_deassert_cb(imu_config.rst_user_data);
+        } else if (imu_config.io_rst != GPIO_NUM_NC) {
+            gpio_set_level(imu_config.io_rst, 1);
+        }
+    }
+}
+
+/**
  * @brief Initializes required gpio outputs.
  *
  * @return ESP_OK if initialization was success.
@@ -534,28 +584,45 @@ esp_err_t BNO08x::init_gpio_outputs()
     esp_err_t ret = ESP_OK;
 
     // configure output(s) (CS, RST)
+    // Skip CS and/or RST if using custom callbacks
     gpio_config_t outputs_config;
 
-    outputs_config.pin_bit_mask = ((1ULL << imu_config.io_cs) | (1ULL << imu_config.io_rst));
+    // Determine which pins to configure as GPIO
+    bool use_cs_gpio = !(imu_config.cs_assert_cb && imu_config.cs_deassert_cb) && (imu_config.io_cs != GPIO_NUM_NC);
+    bool use_rst_gpio = !(imu_config.rst_assert_cb && imu_config.rst_deassert_cb) && (imu_config.io_rst != GPIO_NUM_NC);
 
-    outputs_config.mode = GPIO_MODE_OUTPUT;
-    outputs_config.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    outputs_config.pull_up_en = GPIO_PULLUP_DISABLE;
-    outputs_config.intr_type = GPIO_INTR_DISABLE;
-
-    ret = gpio_config(&outputs_config);
-    if (ret != ESP_OK)
-    {
-        // clang-format off
-        #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Initialization failed, failed to configure CS, and RST gpio.");
-        #endif
-        // clang-format on
+    // Build pin bitmask
+    outputs_config.pin_bit_mask = 0;
+    if (use_cs_gpio) {
+        outputs_config.pin_bit_mask |= (1ULL << imu_config.io_cs);
     }
-    else
-    {
-        init_status.gpio_outputs = true; // set gpio_inputs to initialized such that deconstructor
-                                         // knows to clean them up
+    if (use_rst_gpio) {
+        outputs_config.pin_bit_mask |= (1ULL << imu_config.io_rst);
+    }
+
+    // Only configure GPIO if there are pins to configure
+    if (outputs_config.pin_bit_mask != 0) {
+        outputs_config.mode = GPIO_MODE_OUTPUT;
+        outputs_config.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        outputs_config.pull_up_en = GPIO_PULLUP_DISABLE;
+        outputs_config.intr_type = GPIO_INTR_DISABLE;
+
+        ret = gpio_config(&outputs_config);
+        if (ret != ESP_OK)
+        {
+            // clang-format off
+            #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+            ESP_LOGE(TAG, "Initialization failed, failed to configure CS and RST gpio.");
+            #endif
+            // clang-format on
+        }
+        else
+        {
+            init_status.gpio_outputs = true; // set gpio_inputs to initialized such that deconstructor knows to clean them up
+        }
+    } else {
+        // All outputs are controlled via callbacks, no GPIO config needed
+        init_status.gpio_outputs = true;
     }
 
     return ret;
@@ -580,9 +647,9 @@ esp_err_t BNO08x::init_gpio()
     if (ret != ESP_OK)
         return ret;
 
-    gpio_set_level(imu_config.io_cs, 1);
+    set_cs(1);  // CS high (inactive)
     vTaskDelay(pdMS_TO_TICKS(1) );
-    gpio_set_level(imu_config.io_rst, 1);
+    set_rst(1); // RST high (normal operation)
 
     return ret;
 }
@@ -597,40 +664,45 @@ esp_err_t BNO08x::init_hint_isr()
     esp_err_t ret = ESP_OK;
 
     // check if installation of ISR service has been requested by user (default is true)
-    if (imu_config.install_isr_service)
+    if (imu_config.install_isr_service && !init_status.isr_service)
+    {
         ret = gpio_install_isr_service(0); // install isr service
 
-    if (ret != ESP_OK)
-    {
-        // clang-format off
-        #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Initialization failed, failed to install global ISR service.");
-        #endif
-        // clang-format on
+        if (ret != ESP_OK)
+        {
+            // clang-format off
+            #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+            ESP_LOGE(TAG, "Initialization failed, failed to install global ISR service.");
+            #endif
+            // clang-format on
 
-        return ret;
+            return ret;
+        }
+        else
+        {
+            init_status.isr_service = true; // set isr service to initialized such that deconstructor knows to clean it up
+        }
     }
-    else
-    {
-        init_status.isr_service = true; // set isr service to initialized such that deconstructor knows to clean it up
-                                        // (this will be ignored if imu_config.install_isr_service == false)
-    }
 
-    ret = gpio_isr_handler_add(imu_config.io_int, hint_handler, (void*) this);
-    if (ret != ESP_OK)
+    // Add ISR handler (skip if already added from previous initialization attempt)
+    if (!init_status.isr_handler)
     {
+        ret = gpio_isr_handler_add(imu_config.io_int, hint_handler, (void*) this);
+        if (ret != ESP_OK)
+        {
 
-        // clang-format off
-        #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Initialization failed, failed to add hint_handler ISR.");
-        #endif
-        // clang-format on
+            // clang-format off
+            #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+            ESP_LOGE(TAG, "Initialization failed, failed to add hint_handler ISR.");
+            #endif
+            // clang-format on
 
-        return ret;
-    }
-    else
-    {
-        init_status.isr_handler = true; // set isr handler to initialized such that deconstructor knows to clean it up
+            return ret;
+        }
+        else
+        {
+            init_status.isr_handler = true; // set isr handler to initialized such that deconstructor knows to clean it up
+        }
     }
 
     return ret;
@@ -647,74 +719,83 @@ esp_err_t BNO08x::init_tasks()
 
     xEventGroupSetBits(sync_ctx.evt_grp_task, EVT_GRP_BNO08x_TASKS_RUNNING);
 
-    // launch data processing task 6
-    task_created = xTaskCreatePinnedToCore(
-            &data_proc_task_trampoline, "bno08x_data_processing_task", 
-            DATA_PROC_TASK_SZ, 
-            this, 
-            DATA_PROC_TASK_PRIORITY, 
-            &data_proc_task_hdl, 
-            DATA_PROC_TASK_AFFINITY);
-
-    if (task_created != pdTRUE)
+    // launch data processing task 6 (skip if already created from previous initialization attempt)
+    if (!init_status.data_proc_task)
     {
-        // clang-format off
-        #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Initialization failed, data_proc_task failed to launch.");
-        #endif
-        // clang-format on
+        task_created = xTaskCreatePinnedToCore(
+                &data_proc_task_trampoline, "bno08x_data_processing_task",
+                DATA_PROC_TASK_SZ,
+                this,
+                DATA_PROC_TASK_PRIORITY,
+                &data_proc_task_hdl,
+                DATA_PROC_TASK_AFFINITY);
 
-        return ESP_FAIL;
-    }
-    else
-    {
-        init_status.data_proc_task = true;
-    }
+        if (task_created != pdTRUE)
+        {
+            // clang-format off
+            #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+            ESP_LOGE(TAG, "Initialization failed, data_proc_task failed to launch.");
+            #endif
+            // clang-format on
 
-    // launch cb task 5
-    task_created = xTaskCreatePinnedToCore(&cb_task_trampoline, "bno08x_cb_task", 
-        CB_TASK_SZ, 
-        this, 
-        CB_TASK_PRIORITY, 
-        &cb_task_hdl, 
-        CB_TASK_AFFINITY);
-
-    if (task_created != pdTRUE)
-    {
-        // clang-format off
-        #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Initialization failed, cb_task failed to launch.");
-        #endif
-        // clang-format on
-
-        return ESP_FAIL;
-    }
-    else
-    {
-        init_status.cb_task = true;
+            return ESP_FAIL;
+        }
+        else
+        {
+            init_status.data_proc_task = true;
+        }
     }
 
-    // launch sh2 hal service task 7
-    task_created = xTaskCreatePinnedToCore(&sh2_HAL_service_task_trampoline, "bno08x_sh2_HAL_service_task", 
-        SH2_HAL_SERVICE_TASK_SZ, 
-        this, 
-        SH2_HAL_SERVICE_TASK_PRIORITY,
-        &sh2_HAL_service_task_hdl,
-        SH2_HAL_SERVICE_TASK_AFFINITY);
-
-    if (task_created != pdTRUE)
+    // launch cb task 5 (skip if already created from previous initialization attempt)
+    if (!init_status.cb_task)
     {
-        // clang-format off
-        #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Initialization failed, sh2_HAL_service_task failed to launch.");
-        #endif
-        // clang-format on
+        task_created = xTaskCreatePinnedToCore(&cb_task_trampoline, "bno08x_cb_task",
+            CB_TASK_SZ,
+            this,
+            CB_TASK_PRIORITY,
+            &cb_task_hdl,
+            CB_TASK_AFFINITY);
 
-        return ESP_FAIL;
+        if (task_created != pdTRUE)
+        {
+            // clang-format off
+            #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+            ESP_LOGE(TAG, "Initialization failed, cb_task failed to launch.");
+            #endif
+            // clang-format on
+
+            return ESP_FAIL;
+        }
+        else
+        {
+            init_status.cb_task = true;
+        }
     }
-    else
+
+    // launch sh2 hal service task 7 (skip if already created from previous initialization attempt)
+    if (!init_status.sh2_HAL_service_task)
     {
-        init_status.sh2_HAL_service_task = true;
+        task_created = xTaskCreatePinnedToCore(&sh2_HAL_service_task_trampoline, "bno08x_sh2_HAL_service_task",
+            SH2_HAL_SERVICE_TASK_SZ,
+            this,
+            SH2_HAL_SERVICE_TASK_PRIORITY,
+            &sh2_HAL_service_task_hdl,
+            SH2_HAL_SERVICE_TASK_AFFINITY);
+
+        if (task_created != pdTRUE)
+        {
+            // clang-format off
+            #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+            ESP_LOGE(TAG, "Initialization failed, sh2_HAL_service_task failed to launch.");
+            #endif
+            // clang-format on
+
+            return ESP_FAIL;
+        }
+        else
+        {
+            init_status.sh2_HAL_service_task = true;
+        }
     }
 
     return ESP_OK;
@@ -740,6 +821,7 @@ esp_err_t BNO08x::init_spi()
             #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
             ESP_LOGI(TAG, "SPI bus already initialized (shared bus), skipping bus initialization.");
             #endif
+            vTaskDelay(pdMS_TO_TICKS(10));
             // clang-format on
 
             // This is OK - the bus was initialized by another device
@@ -761,21 +843,32 @@ esp_err_t BNO08x::init_spi()
         init_status.spi_bus = true;
     }
 
-    // add the imu device to the bus
-    ret = spi_bus_add_device(imu_config.spi_peripheral, &imu_spi_config, &spi_hdl);
-    if (ret != ESP_OK)
+    // add the imu device to the bus (skip if already added from previous initialization attempt)
+    if (!init_status.spi_device)
     {
-        // clang-format off
-        #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Initialization failed, failed to add device to SPI bus.");
-        #endif
-        // clang-format on
+        ret = spi_bus_add_device(imu_config.spi_peripheral, &imu_spi_config, &spi_hdl);
+        if (ret != ESP_OK)
+        {
+            // clang-format off
+            #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+            ESP_LOGE(TAG, "Initialization failed, failed to add device to SPI bus.");
+            #endif
+            // clang-format on
 
-        return ret;
+            return ret;
+        }
+        else
+        {
+            init_status.spi_device = true;
+        }
     }
     else
     {
-        init_status.spi_device = true;
+        // clang-format off
+        #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+        ESP_LOGI(TAG, "SPI device already added (retry attempt), skipping device registration.");
+        #endif
+        // clang-format on
     }
     return ret;
 }
@@ -812,6 +905,7 @@ esp_err_t BNO08x::init_sh2_HAL()
 
         return ESP_FAIL;
     }
+    ESP_LOGE(TAG, "Initialization success, sh2_open().");
 
     // Store sh2_instance in sync context for reports to access
     sync_ctx.sh2_instance = sh2_instance;
@@ -819,6 +913,7 @@ esp_err_t BNO08x::init_sh2_HAL()
     init_status.sh2_HAL = true;
 
     memset(&product_IDs, 0, sizeof(sh2_ProductIds_t));
+    ESP_LOGE(TAG, "getting prod id.");
 
     if (sh2_getProdIds(sh2_instance, &product_IDs) != SH2_OK)
     {
@@ -830,6 +925,7 @@ esp_err_t BNO08x::init_sh2_HAL()
 
         return ESP_FAIL;
     }
+    ESP_LOGE(TAG, "got prod id.");
 
     // clang-format off
     #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
@@ -904,28 +1000,36 @@ esp_err_t BNO08x::deinit_gpio_outputs()
 {
     esp_err_t ret = ESP_OK;
 
-    ret = gpio_reset_pin(imu_config.io_cs);
-    if (ret != ESP_OK)
-    {
-        // clang-format off
-        #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Deconstruction failed, could reset gpio CS pin to default state.");
-        #endif
-        // clang-format on
+    // Only reset CS pin if it was configured as native GPIO (not using callbacks)
+    bool use_cs_gpio = !(imu_config.cs_assert_cb && imu_config.cs_deassert_cb) && (imu_config.io_cs != GPIO_NUM_NC);
+    if (use_cs_gpio) {
+        ret = gpio_reset_pin(imu_config.io_cs);
+        if (ret != ESP_OK)
+        {
+            // clang-format off
+            #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+            ESP_LOGE(TAG, "Deconstruction failed, could reset gpio CS pin to default state.");
+            #endif
+            // clang-format on
 
-        return ret;
+            return ret;
+        }
     }
 
-    ret = gpio_reset_pin(imu_config.io_rst);
-    if (ret != ESP_OK)
-    {
-        // clang-format off
-        #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
-        ESP_LOGE(TAG, "Deconstruction failed, could reset gpio RST pin to default state.");
-        #endif
-        // clang-format on
+    // Only reset RST pin if it was configured as native GPIO (not using callbacks)
+    bool use_rst_gpio = !(imu_config.rst_assert_cb && imu_config.rst_deassert_cb) && (imu_config.io_rst != GPIO_NUM_NC);
+    if (use_rst_gpio) {
+        ret = gpio_reset_pin(imu_config.io_rst);
+        if (ret != ESP_OK)
+        {
+            // clang-format off
+            #ifdef CONFIG_ESP32_BNO08x_LOG_STATEMENTS
+            ESP_LOGE(TAG, "Deconstruction failed, could reset gpio RST pin to default state.");
+            #endif
+            // clang-format on
 
-        return ret;
+            return ret;
+        }
     }
 
     return ret;
@@ -1865,12 +1969,12 @@ void BNO08x::toggle_reset()
 {
     gpio_intr_disable(imu_config.io_int); // disable interrupts before reset
 
-    gpio_set_level(imu_config.io_cs, 1);
+    set_cs(1);  // CS high (inactive)
 
-    gpio_set_level(imu_config.io_rst, 0); // set reset pin low
+    set_rst(0); // set reset pin low
     vTaskDelay(HARD_RESET_DELAY_MS);      // 10ns min, set to larger delay to let things stabilize(Anton)
     gpio_intr_enable(imu_config.io_int);  // enable interrupts before bringing out of reset
-    gpio_set_level(imu_config.io_rst, 1); // bring out of reset
+    set_rst(1); // bring out of reset
 }
 
 /**

@@ -320,7 +320,7 @@ typedef PACKED_STRUCT {
 // Private data
 
 // SH2 state - Multi-instance support
-#define SH2_MAX_INSTANCES (4)
+#define SH2_MAX_INSTANCES (12)
 static sh2_t _sh2_instances[SH2_MAX_INSTANCES];
 static bool _sh2_instance_used[SH2_MAX_INSTANCES];
 static bool _sh2_initialized = false;

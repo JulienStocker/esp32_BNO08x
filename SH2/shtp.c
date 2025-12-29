@@ -145,7 +145,7 @@ static const uint8_t advertise[] = {
     CMD_ADVERTISE_ALL
 };
 
-#define MAX_INSTANCES (4)  // Support up to 4 BNO08x sensors
+#define MAX_INSTANCES (12)  // Support up to 4 BNO08x sensors
 static shtp_t instances[MAX_INSTANCES];
 
 static bool shtp_initialized = false;

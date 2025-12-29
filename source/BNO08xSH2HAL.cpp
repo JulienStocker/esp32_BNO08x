@@ -55,20 +55,20 @@ int BNO08xSH2HAL::spi_read(sh2_Hal_t* self, uint8_t* pBuffer, unsigned len, uint
         return 0;
 
     // assert chip select
-    gpio_set_level(imu->imu_config.io_cs, 0);
+    imu->set_cs(0);
 
     packet_sz = spi_read_sh2_packet_header(imu, pBuffer);
 
     if ((packet_sz > len) || (packet_sz == 0))
     {
-        gpio_set_level(imu->imu_config.io_cs, 1);
+        imu->set_cs(1);
         return 0;
     }
 
     packet_sz = spi_read_sh2_packet_body(imu, pBuffer, packet_sz);
 
     // de-assert chip select
-    gpio_set_level(imu->imu_config.io_cs, 1);
+    imu->set_cs(1);
 
     return packet_sz;
 }
@@ -97,13 +97,13 @@ int BNO08xSH2HAL::spi_write(sh2_Hal_t* self, uint8_t* pBuffer, unsigned len)
     imu->spi_transaction.rx_buffer = NULL;
     imu->spi_transaction.flags = 0;
 
-    gpio_set_level(imu->imu_config.io_cs, 0);                         // assert chip select
+    imu->set_cs(0);                         // assert chip select
 
     // send data packet
     if(spi_device_polling_transmit(imu->spi_hdl, &imu->spi_transaction) != ESP_OK)
         return 0;
 
-    gpio_set_level(imu->imu_config.io_cs, 1);                         // de-assert chip select
+    imu->set_cs(1);                         // de-assert chip select
 
     return len;
 }

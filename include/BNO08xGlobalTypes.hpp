@@ -40,11 +40,21 @@ typedef struct bno08x_config_t
         gpio_num_t io_mosi;               ///<MOSI GPIO pin (connects to BNO08x DI pin)
         gpio_num_t io_miso;               ///<MISO GPIO pin (connects to BNO08x SDA pin)
         gpio_num_t io_sclk;               ///<SCLK pin (connects to BNO08x SCL pin)
-        gpio_num_t io_cs;                 /// Chip select pin (connects to BNO08x CS pin)
+        gpio_num_t io_cs;                 /// Chip select pin (connects to BNO08x CS pin), set to -1 if using custom CS callbacks
         gpio_num_t io_int;                /// Host interrupt pin (connects to BNO08x INT pin)
-        gpio_num_t io_rst;                /// Reset pin (connects to BNO08x RST pin)
+        gpio_num_t io_rst;                /// Reset pin (connects to BNO08x RST pin), set to -1 if using custom RST callbacks
         uint32_t sclk_speed;              ///<Desired SPI SCLK speed in Hz (max 3MHz)
         bool install_isr_service; ///<Indicates whether the ISR service for the HINT should be installed at IMU initialization, (if gpio_install_isr_service() is called before initialize() set this to false)
+
+        // Custom CS control callbacks (for GPIO expanders like MCP23017)
+        void (*cs_assert_cb)(void*);   ///<Callback to assert CS (set low), NULL to use native GPIO
+        void (*cs_deassert_cb)(void*); ///<Callback to deassert CS (set high), NULL to use native GPIO
+        void* cs_user_data;            ///<User data passed to CS callbacks
+
+        // Custom RST control callbacks (for GPIO expanders like MCP23017)
+        void (*rst_assert_cb)(void*);   ///<Callback to assert RST (set low), NULL to use native GPIO
+        void (*rst_deassert_cb)(void*); ///<Callback to deassert RST (set high), NULL to use native GPIO
+        void* rst_user_data;            ///<User data passed to RST callbacks
 
         /// @brief Default IMU configuration settings constructor.
         /// To modify default GPIO pins, run "idf.py menuconfig" esp32_BNO08x->GPIO Configuration.
@@ -59,13 +69,20 @@ typedef struct bno08x_config_t
             , io_rst(static_cast<gpio_num_t>(CONFIG_ESP32_BNO08X_GPIO_RST))       // default: 32
             , sclk_speed(static_cast<uint32_t>(CONFIG_ESP32_BNO08X_SCL_SPEED_HZ)) // default: 2MHz
             , install_isr_service(install_isr_service)                            // default: true
-
+            , cs_assert_cb(nullptr)
+            , cs_deassert_cb(nullptr)
+            , cs_user_data(nullptr)
+            , rst_assert_cb(nullptr)
+            , rst_deassert_cb(nullptr)
+            , rst_user_data(nullptr)
         {
         }
 
         /// @brief Overloaded IMU configuration settings constructor for custom pin settings
         bno08x_config_t(spi_host_device_t spi_peripheral, gpio_num_t io_mosi, gpio_num_t io_miso, gpio_num_t io_sclk,
-                gpio_num_t io_cs, gpio_num_t io_int, gpio_num_t io_rst, uint32_t sclk_speed, bool install_isr_service = true)
+                gpio_num_t io_cs, gpio_num_t io_int, gpio_num_t io_rst, uint32_t sclk_speed, bool install_isr_service = true,
+                void (*cs_assert_cb)(void*) = nullptr, void (*cs_deassert_cb)(void*) = nullptr, void* cs_user_data = nullptr,
+                void (*rst_assert_cb)(void*) = nullptr, void (*rst_deassert_cb)(void*) = nullptr, void* rst_user_data = nullptr)
             : spi_peripheral(spi_peripheral)
             , io_mosi(io_mosi)
             , io_miso(io_miso)
@@ -75,6 +92,12 @@ typedef struct bno08x_config_t
             , io_rst(io_rst)
             , sclk_speed(sclk_speed)
             , install_isr_service(install_isr_service)
+            , cs_assert_cb(cs_assert_cb)
+            , cs_deassert_cb(cs_deassert_cb)
+            , cs_user_data(cs_user_data)
+            , rst_assert_cb(rst_assert_cb)
+            , rst_deassert_cb(rst_deassert_cb)
+            , rst_user_data(rst_user_data)
         {
         }
 } bno08x_config_t;

@@ -184,6 +184,10 @@ class BNO08x
         esp_err_t init_tasks();
         esp_err_t init_sh2_HAL();
 
+        // Helper functions for CS and RST control (supports both native GPIO and callbacks)
+        void set_cs(uint8_t level);
+        void set_rst(uint8_t level);
+
         esp_err_t deinit_gpio();
         esp_err_t deinit_gpio_inputs();
         esp_err_t deinit_gpio_outputs();
